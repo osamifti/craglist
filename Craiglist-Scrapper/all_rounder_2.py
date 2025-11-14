@@ -122,36 +122,93 @@ class CraigslistScraper:
         
         # Try system chromedriver first (common locations in Docker/Ubuntu)
         system_chromedriver = None
-        for driver_path in [
-            "/usr/bin/chromedriver",
-            "/usr/lib/chromium/chromedriver",
-            "/usr/lib/chromium-browser/chromedriver",
-            "/usr/lib64/chromium/chromedriver"
-        ]:
-            if os.path.exists(driver_path) and os.access(driver_path, os.X_OK):
-                system_chromedriver = driver_path
-                logger.info(f"Using system chromedriver: {system_chromedriver}")
-                break
+        import shutil
+        
+        # First, try to find in PATH
+        chromedriver_in_path = shutil.which("chromedriver")
+        if chromedriver_in_path and os.path.exists(chromedriver_in_path):
+            system_chromedriver = chromedriver_in_path
+            logger.info(f"Found chromedriver in PATH: {system_chromedriver}")
+        
+        # If not in PATH, check common locations
+        if not system_chromedriver:
+            for driver_path in [
+                "/usr/bin/chromedriver",
+                "/usr/lib/chromium/chromedriver",
+                "/usr/lib/chromium-browser/chromedriver",
+                "/usr/lib64/chromium/chromedriver",
+                "/usr/local/bin/chromedriver"
+            ]:
+                if os.path.exists(driver_path):
+                    # Try to make it executable if it's not
+                    if not os.access(driver_path, os.X_OK):
+                        try:
+                            os.chmod(driver_path, 0o755)
+                            logger.info(f"Made chromedriver executable: {driver_path}")
+                        except Exception as e:
+                            logger.warning(f"Could not make {driver_path} executable: {e}")
+                    
+                    if os.access(driver_path, os.X_OK):
+                        system_chromedriver = driver_path
+                        logger.info(f"Using system chromedriver: {system_chromedriver}")
+                        break
         
         using_system_driver = False
         if system_chromedriver:
             driver_path = system_chromedriver
             using_system_driver = True
         else:
-            # Fallback to ChromeDriverManager
+            # Fallback to ChromeDriverManager (but this will likely fail in Docker)
+            logger.warning("System chromedriver not found, attempting ChromeDriverManager (may fail in Docker)")
             try:
                 driver_path = ChromeDriverManager().install()
+                logger.info(f"ChromeDriverManager installed driver at: {driver_path}")
             except Exception as e:
-                logger.warning(f"ChromeDriverManager failed: {e}, trying to use system chromedriver")
-                # Last resort: try to find chromedriver in PATH
-                import shutil
-                chromedriver_in_path = shutil.which("chromedriver")
-                if chromedriver_in_path:
-                    driver_path = chromedriver_in_path
+                logger.error(f"ChromeDriverManager failed: {e}")
+                # Final attempt: search specific known locations for chromedriver
+                logger.info("Performing final search for chromedriver in known locations...")
+                found_driver = None
+                # Search in specific subdirectories to avoid slow full tree walks
+                search_locations = [
+                    "/usr/lib/chromium",
+                    "/usr/lib/chromium-browser",
+                    "/usr/lib64/chromium",
+                    "/usr/local/bin",
+                    "/usr/local/lib",
+                    "/opt/chromium",
+                ]
+                for search_path in search_locations:
+                    if os.path.exists(search_path):
+                        for root, dirs, files in os.walk(search_path):
+                            # Limit depth to avoid slow searches
+                            depth = root[len(search_path):].count(os.sep)
+                            if depth > 2:  # Max 2 levels deep
+                                dirs[:] = []  # Don't recurse deeper
+                                continue
+                            
+                            if "chromedriver" in files:
+                                candidate = os.path.join(root, "chromedriver")
+                                if os.path.isfile(candidate):
+                                    try:
+                                        os.chmod(candidate, 0o755)
+                                        found_driver = candidate
+                                        logger.info(f"Found chromedriver via filesystem search: {found_driver}")
+                                        break
+                                    except Exception:
+                                        continue
+                            if found_driver:
+                                break
+                    if found_driver:
+                        break
+                
+                if found_driver:
+                    driver_path = found_driver
                     using_system_driver = True
-                    logger.info(f"Found chromedriver in PATH: {driver_path}")
                 else:
-                    raise RuntimeError("Could not find chromedriver. Please ensure chromium-driver is installed.")
+                    raise RuntimeError(
+                        "Could not find chromedriver. Please ensure chromium-driver is installed. "
+                        "Checked: PATH, /usr/bin, /usr/lib/chromium, and performed filesystem search."
+                    )
 
         # Only process ChromeDriverManager paths (skip for system drivers)
         if not using_system_driver:

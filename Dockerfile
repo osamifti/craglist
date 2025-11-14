@@ -11,6 +11,7 @@ COPY Craiglist-Scrapper/requirements.txt /app/requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
+    chromium-sandbox \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -27,9 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     wget \
     ca-certificates \
+    findutils \
 && rm -rf /var/lib/apt/lists/* \
-&& ln -sf /usr/lib/chromium/chromedriver /usr/bin/chromedriver || true \
-&& chmod +x /usr/lib/chromium/chromedriver || true \
+&& (find /usr -name "chromedriver" -type f 2>/dev/null | head -1 | xargs -I {} ln -sf {} /usr/bin/chromedriver || true) \
+&& (find /usr -name "chromedriver" -type f 2>/dev/null | head -1 | xargs -I {} chmod +x {} || true) \
+&& chmod +x /usr/bin/chromedriver 2>/dev/null || true \
 && pip install --upgrade pip \
 && pip install -r requirements.txt
 
