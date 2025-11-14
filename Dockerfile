@@ -35,7 +35,7 @@ COPY Craiglist-Scrapper /app/Craiglist-Scrapper
 
 ENV PYTHONPATH=/app/Craiglist-Scrapper
 
-EXPOSE 5001
+EXPOSE 8080
 
-CMD ["sh", "-c", "WEBHOOK_PORT=${PORT:-5001} python Craiglist-Scrapper/messaging.py server"]
+CMD ["python", "Craiglist-Scrapper/messaging.py", "server"]
 

@@ -375,6 +375,21 @@ def process_incoming_message():
         response.message("Sorry, I encountered an error. Please try again later.")
         return str(response), 200, {'Content-Type': 'text/xml'}  # Return 200 to avoid Twilio retries
 
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint showing available API endpoints."""
+    return json.dumps({
+        'status': 'online',
+        'service': 'Craigslist Scraper with Unified Messaging',
+        'endpoints': {
+            '/webhook': 'POST - Twilio webhook for inbound SMS',
+            '/send': 'POST/GET - Send outbound SMS messages',
+            '/pipeline/run': 'POST/GET - Trigger lead generation pipeline',
+            '/status': 'GET - Check server status and pipeline state'
+        },
+        'port': os.getenv('PORT', '5001')
+    }, indent=2), 200, {'Content-Type': 'application/json'}
+
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     """
@@ -759,7 +774,8 @@ if __name__ == "__main__":
     # Check command line arguments to determine mode
     if len(sys.argv) > 1 and sys.argv[1] == 'server':
         # Run webhook server mode
-        port = int(os.getenv('WEBHOOK_PORT', 5001))
+        # Railway sets PORT, WEBHOOK_PORT, or default to 5001
+        port = int(os.getenv('PORT') or os.getenv('WEBHOOK_PORT', '5001'))
         debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
         run_webhook_server(port=port, debug=debug)
     else:
