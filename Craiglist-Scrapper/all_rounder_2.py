@@ -105,11 +105,30 @@ class CraigslistScraper:
         if self.config.HEADLESS_MODE:
             chrome_options.add_argument("--headless=new")
         
+        # Essential Docker/container options
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-background-timer-throttling")
+        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_options.add_argument("--disable-renderer-backgrounding")
+        chrome_options.add_argument("--disable-features=TranslateUI")
+        chrome_options.add_argument("--disable-ipc-flooding-protection")
+        
+        # Additional stability options
         chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Set preferences to avoid crashes
+        prefs = {
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_settings.popups": 0,
+            "profile.managed_default_content_settings.images": 1,
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
         
         # Try to use system chromium/chromedriver first (for Docker/Railway)
         chromium_binary = None
@@ -247,10 +266,28 @@ class CraigslistScraper:
         os.environ["PATH"] = f"{driver_dir}{os.pathsep}" + os.environ.get("PATH", "")
 
         service = Service(executable_path=driver_path)
-        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.wait = WebDriverWait(self.driver, 15)
         
-        logger.info("Chrome WebDriver initialized successfully")
+        # Try to create driver, with fallback to single-process mode if it fails
+        try:
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("Chrome WebDriver initialized successfully")
+        except Exception as e:
+            logger.warning(f"Initial Chrome driver creation failed: {e}")
+            logger.info("Retrying with --single-process mode (Docker compatibility)...")
+            # Add single-process option as fallback
+            chrome_options.add_argument("--single-process")
+            try:
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                logger.info("Chrome WebDriver initialized successfully with --single-process")
+            except Exception as e2:
+                logger.error(f"Chrome driver creation failed even with --single-process: {e2}")
+                raise RuntimeError(
+                    f"Failed to initialize Chrome WebDriver. "
+                    f"First attempt: {e}. Second attempt (with --single-process): {e2}. "
+                    f"Ensure Chromium and chromedriver are properly installed and compatible."
+                ) from e2
+        
+        self.wait = WebDriverWait(self.driver, 15)
     
     def scrape_listings(self) -> List[Dict]:
         """
