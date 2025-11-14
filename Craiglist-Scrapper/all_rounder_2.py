@@ -111,28 +111,70 @@ class CraigslistScraper:
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         
-        driver_path = ChromeDriverManager().install()
+        # Try to use system chromium/chromedriver first (for Docker/Railway)
+        chromium_binary = None
+        for binary_path in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]:
+            if os.path.exists(binary_path):
+                chromium_binary = binary_path
+                chrome_options.binary_location = chromium_binary
+                logger.info(f"Using browser binary: {chromium_binary}")
+                break
+        
+        # Try system chromedriver first (common locations in Docker/Ubuntu)
+        system_chromedriver = None
+        for driver_path in [
+            "/usr/bin/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+            "/usr/lib64/chromium/chromedriver"
+        ]:
+            if os.path.exists(driver_path) and os.access(driver_path, os.X_OK):
+                system_chromedriver = driver_path
+                logger.info(f"Using system chromedriver: {system_chromedriver}")
+                break
+        
+        using_system_driver = False
+        if system_chromedriver:
+            driver_path = system_chromedriver
+            using_system_driver = True
+        else:
+            # Fallback to ChromeDriverManager
+            try:
+                driver_path = ChromeDriverManager().install()
+            except Exception as e:
+                logger.warning(f"ChromeDriverManager failed: {e}, trying to use system chromedriver")
+                # Last resort: try to find chromedriver in PATH
+                import shutil
+                chromedriver_in_path = shutil.which("chromedriver")
+                if chromedriver_in_path:
+                    driver_path = chromedriver_in_path
+                    using_system_driver = True
+                    logger.info(f"Found chromedriver in PATH: {driver_path}")
+                else:
+                    raise RuntimeError("Could not find chromedriver. Please ensure chromium-driver is installed.")
 
-        if os.path.basename(driver_path).startswith("THIRD_PARTY_NOTICES"):
-            driver_path = os.path.dirname(driver_path)
+        # Only process ChromeDriverManager paths (skip for system drivers)
+        if not using_system_driver:
+            if os.path.basename(driver_path).startswith("THIRD_PARTY_NOTICES"):
+                driver_path = os.path.dirname(driver_path)
 
-        if os.path.isdir(driver_path):
-            candidate = os.path.join(driver_path, "chromedriver")
-            if os.path.isfile(candidate):
-                driver_path = candidate
-            else:
-                resolved = None
-                for root, _dirs, files in os.walk(driver_path):
-                    for filename in files:
-                        if filename in {"chromedriver", "chromedriver.exe"}:
-                            full_path = os.path.join(root, filename)
-                            if os.path.isfile(full_path):
-                                resolved = full_path
-                                break
+            if os.path.isdir(driver_path):
+                candidate = os.path.join(driver_path, "chromedriver")
+                if os.path.isfile(candidate):
+                    driver_path = candidate
+                else:
+                    resolved = None
+                    for root, _dirs, files in os.walk(driver_path):
+                        for filename in files:
+                            if filename in {"chromedriver", "chromedriver.exe"}:
+                                full_path = os.path.join(root, filename)
+                                if os.path.isfile(full_path):
+                                    resolved = full_path
+                                    break
+                        if resolved:
+                            break
                     if resolved:
-                        break
-                if resolved:
-                    driver_path = resolved
+                        driver_path = resolved
 
         if os.path.isfile(driver_path) and not os.access(driver_path, os.X_OK):
             try:
