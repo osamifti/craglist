@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Craigslist Leads Generator</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Craigslist Leads Generator</h1>
+            <p class="subtitle">AI Conversation Management Dashboard</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Sidebar: Thread List -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <h2>Conversations</h2>
+                    <button id="refreshBtn" class="refresh-btn">
+                        <span class="refresh-icon">↻</span>
+                        <span>Refresh</span>
+                    </button>
+                </div>
+                <div class="search-container">
+                    <input 
+                        type="text" 
+                        id="searchInput" 
+                        class="search-input" 
+                        placeholder="Search by phone number..."
+                        autocomplete="off"
+                    >
+                    <span class="search-icon">🔍</span>
+                </div>
+                <div id="threadList" class="thread-list">
+                    <div class="loading">Loading conversations...</div>
+                </div>
+            </aside>
+
+            <!-- Main Chat Area -->
+            <main class="chat-area">
+                <div id="emptyState" class="empty-state">
+                    <div class="empty-icon">💬</div>
+                    <h3>Select a conversation</h3>
+                    <p>Choose a conversation from the sidebar to view messages</p>
+                </div>
+
+                <div id="chatContainer" class="chat-container" style="display: none;">
+                    <div class="chat-header">
+                        <div class="chat-info">
+                            <h3 id="chatTitle">Conversation</h3>
+                            <p id="chatMeta">Phone: - | Messages: -</p>
+                        </div>
+                        <div class="chat-tabs">
+                            <button class="tab-btn active" data-tab="all">All Messages</button>
+                            <button class="tab-btn" data-tab="inbound">Inbound</button>
+                            <button class="tab-btn" data-tab="outbound">Outbound</button>
+                        </div>
+                    </div>
+
+                    <div id="messagesContainer" class="messages-container">
+                        <!-- Messages will be inserted here -->
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+

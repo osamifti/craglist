@@ -14,6 +14,7 @@ from threading import Thread, Lock
 from typing import Any, Dict, Optional
 
 from all_rounder_2 import run_pipeline_from_payload
+from database import init_database, save_message, get_conversations_by_thread, get_all_threads, get_messages_by_type
 
 
 # Try to import ASGI adapter for uvicorn compatibility
@@ -75,7 +76,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 OPENAI_ASSISTANTS_HEADER = {"OpenAI-Beta": "assistants=v2"}
 
 # Initialize Flask app for webhook server
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='')
 
 # System prompt for OpenAI - loaded from .env file, fallback to default
 SYSTEM_PROMPT = os.getenv(
@@ -384,10 +385,28 @@ def process_incoming_message():
         
         logger.info(f"Received message - Thread ID: {thread_id}, From: {sender_phone} ({normalized_sender_phone}), Message: {incoming_message}")
         
+        # Save inbound message to database
+        save_message(
+            thread_id=thread_id,
+            phone_number=normalized_sender_phone,
+            message_type='inbound',
+            role='user',
+            content=incoming_message
+        )
+        
         # Generate AI response using OpenAI API and system prompt from .env
         # Use normalized phone number for consistent conversation history lookup
         # Thread ID is used for logging and tracking, but phone number is used for conversation history
         ai_response = generate_ai_response(incoming_message, normalized_sender_phone)
+        
+        # Save outbound message to database
+        save_message(
+            thread_id=thread_id,
+            phone_number=normalized_sender_phone,
+            message_type='outbound',
+            role='assistant',
+            content=ai_response
+        )
         
         # Create TwiML response to send back to the user
         response = MessagingResponse()
@@ -406,14 +425,25 @@ def process_incoming_message():
 
 @app.route('/', methods=['GET'])
 def root():
-    """Root endpoint showing available API endpoints."""
+    """Serve the frontend dashboard."""
+    return app.send_static_file('index.html')
+
+@app.route('/api', methods=['GET'])
+def api_info():
+    """API information endpoint."""
     return json.dumps({
         'status': 'online',
         'service': 'Craigslist Scraper with Unified Messaging',
         'endpoints': {
+            '/': 'GET - Frontend dashboard',
             '/webhook': 'POST - Twilio webhook for inbound SMS',
             '/send': 'POST/GET - Send outbound SMS messages',
             '/pipeline/run': 'POST/GET - Trigger lead generation pipeline',
+            '/pipeline/stop': 'POST/GET - Stop running pipeline',
+            '/api/conversations': 'GET - Get all conversation threads',
+            '/api/conversations/<thread_id>': 'GET - Get messages for a thread',
+            '/api/conversations/<thread_id>/inbound': 'GET - Get inbound messages',
+            '/api/conversations/<thread_id>/outbound': 'GET - Get outbound messages',
             '/status': 'GET - Check server status and pipeline state'
         },
         'port': os.getenv('PORT', '5001')
@@ -591,6 +621,159 @@ def stop_pipeline():
     }), 200, {'Content-Type': 'application/json'}
 
 
+@app.route('/api/conversations', methods=['GET'])
+def get_conversations():
+    """
+    Get all conversation threads with summary information.
+    
+    Returns:
+        JSON response with list of all threads
+    """
+    try:
+        threads = get_all_threads()
+        logger.info(f"API /api/conversations returning {len(threads)} threads")
+        return json.dumps({
+            'success': True,
+            'threads': threads,
+            'count': len(threads)
+        }, indent=2), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        logger.error(f"Error fetching conversations: {e}", exc_info=True)
+        return json.dumps({
+            'success': False,
+            'error': str(e),
+            'threads': [],
+            'count': 0
+        }), 500, {'Content-Type': 'application/json'}
+
+
+@app.route('/api/conversations/<thread_id>', methods=['GET'])
+def get_conversation_by_thread(thread_id):
+    """
+    Get all messages for a specific thread.
+    
+    Args:
+        thread_id: Thread identifier
+    
+    Returns:
+        JSON response with all messages in the thread
+    """
+    try:
+        messages = get_conversations_by_thread(thread_id)
+        return json.dumps({
+            'success': True,
+            'thread_id': thread_id,
+            'messages': messages,
+            'count': len(messages)
+        }, indent=2), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        logger.error(f"Error fetching conversation by thread: {e}")
+        return json.dumps({
+            'success': False,
+            'error': str(e)
+        }), 500, {'Content-Type': 'application/json'}
+
+
+@app.route('/api/conversations/<thread_id>/inbound', methods=['GET'])
+def get_inbound_messages(thread_id):
+    """
+    Get all inbound messages for a specific thread.
+    
+    Args:
+        thread_id: Thread identifier
+    
+    Returns:
+        JSON response with inbound messages
+    """
+    try:
+        messages = get_messages_by_type(thread_id, 'inbound')
+        return json.dumps({
+            'success': True,
+            'thread_id': thread_id,
+            'message_type': 'inbound',
+            'messages': messages,
+            'count': len(messages)
+        }, indent=2), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        logger.error(f"Error fetching inbound messages: {e}")
+        return json.dumps({
+            'success': False,
+            'error': str(e)
+        }), 500, {'Content-Type': 'application/json'}
+
+
+@app.route('/api/conversations/<thread_id>/outbound', methods=['GET'])
+def get_outbound_messages(thread_id):
+    """
+    Get all outbound messages for a specific thread.
+    
+    Args:
+        thread_id: Thread identifier
+    
+    Returns:
+        JSON response with outbound messages
+    """
+    try:
+        messages = get_messages_by_type(thread_id, 'outbound')
+        return json.dumps({
+            'success': True,
+            'thread_id': thread_id,
+            'message_type': 'outbound',
+            'messages': messages,
+            'count': len(messages)
+        }, indent=2), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        logger.error(f"Error fetching outbound messages: {e}")
+        return json.dumps({
+            'success': False,
+            'error': str(e)
+        }), 500, {'Content-Type': 'application/json'}
+
+
+@app.route('/api/debug/conversations', methods=['GET'])
+def debug_conversations():
+    """
+    Debug endpoint to check database status and raw data.
+    """
+    try:
+        from database import get_db_connection
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get total count
+        cursor.execute("SELECT COUNT(*) as total FROM conversations")
+        count = cursor.fetchone()
+        
+        # Get sample records
+        cursor.execute("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 5")
+        samples = cursor.fetchall()
+        
+        # Get thread summary
+        cursor.execute("""
+            SELECT thread_id, COUNT(*) as cnt 
+            FROM conversations 
+            GROUP BY thread_id 
+            LIMIT 10
+        """)
+        threads = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return json.dumps({
+            'success': True,
+            'total_messages': count.get('total', 0) if count else 0,
+            'sample_messages': samples,
+            'thread_summary': threads
+        }, indent=2, default=str), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}", exc_info=True)
+        return json.dumps({
+            'success': False,
+            'error': str(e)
+        }), 500, {'Content-Type': 'application/json'}
+
+
 @app.route('/status', methods=['GET'])
 def status():
     """
@@ -729,6 +912,18 @@ def send_sms(to_number, message, initialize_conversation=True):
         if initialize_conversation:
             # Normalize phone number format for consistent lookup
             normalized_phone = formatted_number
+            # Get or create thread ID
+            thread_id = thread_id_mapping.get(normalized_phone, normalized_phone)
+            
+            # Save outbound message to database
+            save_message(
+                thread_id=thread_id,
+                phone_number=normalized_phone,
+                message_type='outbound',
+                role='assistant',
+                content=message
+            )
+            
             # Only initialize if conversation doesn't exist yet
             if normalized_phone not in conversation_history or len(conversation_history[normalized_phone]) == 0:
                 conversation_history[normalized_phone].append({
@@ -801,6 +996,15 @@ def run_webhook_server(host='0.0.0.0', port=5001, debug=False):
         https://your-domain.com/webhook (for production)
         Or use ngrok for local development: ngrok http 5001
     """
+    # Initialize database on server start
+    try:
+        logger.info("Initializing database...")
+        init_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        logger.warning("Server will continue but database features may not work")
+    
     logger.info("=" * 60)
     logger.info(f"Starting webhook server on {host}:{port}")
     logger.info("The bot is now listening for incoming messages...")
