@@ -107,6 +107,7 @@ assistant_thread_mapping: dict[str, str] = {}
 # Track pipeline execution status for unified control plane
 pipeline_status: Dict[str, object] = {
     "is_running": False,
+    "stop_requested": False,
     "last_run_started_at": None,
     "last_run_finished_at": None,
     "last_result": None,
@@ -123,6 +124,17 @@ def _update_pipeline_status(**kwargs):
         pipeline_status.update(kwargs)
 
 
+def _is_stop_requested() -> bool:
+    """
+    Check if a stop has been requested for the running pipeline.
+    
+    Returns:
+        True if stop was requested, False otherwise
+    """
+    with pipeline_lock:
+        return bool(pipeline_status.get("stop_requested", False))
+
+
 def _start_pipeline_thread(skip_scraping: bool, skip_salesforce: bool, skip_sms: bool,
                            headless: Optional[bool], url_override: Optional[str]):
     """Launch the lead generation pipeline in a background thread."""
@@ -130,6 +142,7 @@ def _start_pipeline_thread(skip_scraping: bool, skip_salesforce: bool, skip_sms:
     def runner():
         _update_pipeline_status(
             is_running=True,
+            stop_requested=False,
             last_run_started_at=datetime.utcnow().isoformat(),
             last_run_finished_at=None,
             last_result=None,
@@ -150,11 +163,26 @@ def _start_pipeline_thread(skip_scraping: bool, skip_salesforce: bool, skip_sms:
             if url_override:
                 payload["url"] = url_override
 
-            summary = run_pipeline_from_payload(payload)
+            # Pass stop check function to pipeline
+            summary = run_pipeline_from_payload(payload, stop_check=_is_stop_requested)
 
+            # Check if pipeline was stopped
+            if summary.get("status") == "stopped":
+                _update_pipeline_status(
+                    last_result="stopped",
+                    last_summary=summary,
+                    error="Pipeline stopped by user request",
+                )
+            else:
+                _update_pipeline_status(
+                    last_result="success",
+                    last_summary=summary,
+                )
+        except KeyboardInterrupt:
+            logger.info("Pipeline execution interrupted by stop request")
             _update_pipeline_status(
-                last_result="success",
-                last_summary=summary,
+                last_result="stopped",
+                error="Pipeline stopped by user request",
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Pipeline execution failed")
@@ -165,6 +193,7 @@ def _start_pipeline_thread(skip_scraping: bool, skip_salesforce: bool, skip_sms:
         finally:
             _update_pipeline_status(
                 is_running=False,
+                stop_requested=False,
                 last_run_finished_at=datetime.utcnow().isoformat(),
             )
 
@@ -531,6 +560,36 @@ def trigger_pipeline():
         'message': 'Pipeline run started',
         'status': pipeline_status,
     }), 202, {'Content-Type': 'application/json'}
+
+
+@app.route('/pipeline/stop', methods=['POST', 'GET'])
+def stop_pipeline():
+    """
+    HTTP endpoint to stop the currently running pipeline.
+    
+    Returns:
+        JSON response indicating whether the stop request was successful
+    """
+    with pipeline_lock:
+        if not pipeline_status.get("is_running"):
+            return json.dumps({
+                'success': False,
+                'error': 'No pipeline is currently running',
+                'status': pipeline_status,
+            }), 409, {'Content-Type': 'application/json'}
+        
+        # Set stop flag
+        pipeline_status["stop_requested"] = True
+        status_snapshot = dict(pipeline_status)
+    
+    logger.info("Stop request received for running pipeline")
+    
+    return json.dumps({
+        'success': True,
+        'message': 'Stop request sent. Pipeline will stop after current operation completes.',
+        'status': status_snapshot,
+    }), 200, {'Content-Type': 'application/json'}
+
 
 @app.route('/status', methods=['GET'])
 def status():

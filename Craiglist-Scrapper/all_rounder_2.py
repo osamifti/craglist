@@ -10,10 +10,11 @@ import csv
 import re
 import json
 import logging
+import subprocess
 import pandas as pd
 import requests
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 from dotenv import load_dotenv
 
 # Selenium imports
@@ -90,11 +91,19 @@ class PipelineConfig:
 class CraigslistScraper:
     """Scrapes Craigslist vehicle listings"""
     
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, stop_check: Optional[Callable[[], bool]] = None):
+        """
+        Initialize the Craigslist scraper.
+        
+        Args:
+            config: Pipeline configuration object
+            stop_check: Optional callback function that returns True if scraping should stop
+        """
         self.config = config
         self.driver = None
         self.wait = None
         self._clicked_show_contact_recently = False
+        self.stop_check = stop_check
         self._setup_chrome_driver()
     
     def _setup_chrome_driver(self):
@@ -265,7 +274,12 @@ class CraigslistScraper:
         driver_dir = os.path.dirname(driver_path)
         os.environ["PATH"] = f"{driver_dir}{os.pathsep}" + os.environ.get("PATH", "")
 
-        service = Service(executable_path=driver_path)
+        # Create Service with explicit log output handling to avoid closed file handle issues
+        # Use subprocess.DEVNULL to prevent file handle conflicts in Docker environments
+        service = Service(
+            executable_path=driver_path,
+            log_output=subprocess.DEVNULL  # Prevent file handle issues
+        )
         
         # Try to create driver, with fallback to single-process mode if it fails
         try:
@@ -274,10 +288,15 @@ class CraigslistScraper:
         except Exception as e:
             logger.warning(f"Initial Chrome driver creation failed: {e}")
             logger.info("Retrying with --single-process mode (Docker compatibility)...")
+            # Create a fresh Service object for retry to avoid closed file handle issues
+            service_retry = Service(
+                executable_path=driver_path,
+                log_output=subprocess.DEVNULL
+            )
             # Add single-process option as fallback
             chrome_options.add_argument("--single-process")
             try:
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                self.driver = webdriver.Chrome(service=service_retry, options=chrome_options)
                 logger.info("Chrome WebDriver initialized successfully with --single-process")
             except Exception as e2:
                 logger.error(f"Chrome driver creation failed even with --single-process: {e2}")
@@ -317,6 +336,11 @@ class CraigslistScraper:
             # Scrape each listing
             vehicles = []
             for index in range(total_cards):
+                # Check for stop request before processing each listing
+                if self.stop_check and self.stop_check():
+                    logger.info(f"Stop requested. Processed {len(vehicles)}/{total_cards} listings before stopping.")
+                    break
+                
                 try:
                     logger.info(f"Processing listing {index + 1}/{total_cards}")
                     
@@ -546,10 +570,22 @@ class CraigslistScraper:
             logger.error(f"Error navigating back: {str(e)}")
     
     def close(self):
-        """Close browser"""
+        """
+        Close browser and cleanup resources.
+        
+        Ensures proper cleanup of Chrome processes to prevent resource leaks
+        and file handle issues in subsequent requests.
+        """
         if self.driver:
-            self.driver.quit()
-            logger.info("Browser closed")
+            try:
+                self.driver.quit()
+                logger.info("Browser closed successfully")
+            except Exception as e:
+                logger.warning(f"Error closing browser: {e}")
+            finally:
+                # Ensure driver reference is cleared
+                self.driver = None
+                self.wait = None
 
 
 # =============================================================================
@@ -1028,7 +1064,7 @@ class LeadGenerationPipeline:
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
     
-    def run(self, skip_scraping: bool = False, skip_salesforce: bool = False, skip_sms: bool = False) -> Dict[str, Any]:
+    def run(self, skip_scraping: bool = False, skip_salesforce: bool = False, skip_sms: bool = False, stop_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         Run the complete pipeline
         
@@ -1046,13 +1082,54 @@ class LeadGenerationPipeline:
         start_time = time.time()
         
         # Step 1: Scrape or load data
-        if not skip_scraping:
-            scraper = CraigslistScraper(self.config)
-            vehicles = scraper.scrape_listings()
-        else:
-            logger.info("Skipping scraping - loading from CSV")
-            # Implement CSV loading logic here if needed
-            vehicles = []
+        scraper = None
+        try:
+            if not skip_scraping:
+                # Check for stop request before starting scraping
+                if stop_check and stop_check():
+                    logger.info("Stop requested before scraping started")
+                    return {
+                        'status': 'stopped',
+                        'vehicles_scraped': 0,
+                        'vehicles_with_phone_numbers': 0,
+                        'qualified_leads': 0,
+                        'non_leads': 0,
+                        'scraped_data_file': None,
+                        'qualified_leads_file': None,
+                        'salesforce_results': None,
+                        'sms_results': None,
+                        'elapsed_seconds': time.time() - start_time,
+                    }
+                
+                scraper = CraigslistScraper(self.config, stop_check=stop_check)
+                vehicles = scraper.scrape_listings()
+            else:
+                logger.info("Skipping scraping - loading from CSV")
+                # Implement CSV loading logic here if needed
+                vehicles = []
+        finally:
+            # Ensure scraper is always closed to prevent resource leaks
+            if scraper:
+                try:
+                    scraper.close()
+                except Exception as cleanup_error:
+                    logger.warning(f"Error during scraper cleanup: {cleanup_error}")
+        
+        # Check for stop request after scraping
+        if stop_check and stop_check():
+            logger.info("Stop requested after scraping")
+            return {
+                'status': 'stopped',
+                'vehicles_scraped': len(vehicles) if vehicles else 0,
+                'vehicles_with_phone_numbers': 0,
+                'qualified_leads': 0,
+                'non_leads': 0,
+                'scraped_data_file': None,
+                'qualified_leads_file': None,
+                'salesforce_results': None,
+                'sms_results': None,
+                'elapsed_seconds': time.time() - start_time,
+            }
         
         if not vehicles:
             logger.error("No vehicles to process. Exiting.")
@@ -1230,7 +1307,7 @@ Examples:
     return 0
 
 
-def run_pipeline_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def run_pipeline_from_payload(payload: Dict[str, Any], stop_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Configure and execute the pipeline based on an HTTP payload.
 
     Args:
@@ -1241,6 +1318,8 @@ def run_pipeline_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             - "headless" (bool): Run Selenium in headless mode.
             - "url" (str): Override the default Craigslist search URL.
             - "initial_message" (str): Override the first SMS sent to leads.
+        stop_check: Optional callback function that returns True if pipeline should stop.
+                    Called periodically during execution to check for stop requests.
 
     Returns:
         Execution summary dictionary from :py:meth:`LeadGenerationPipeline.run`.
@@ -1275,6 +1354,7 @@ def run_pipeline_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         skip_scraping=skip_scraping,
         skip_salesforce=skip_salesforce,
         skip_sms=skip_sms,
+        stop_check=stop_check,
     )
 
 
