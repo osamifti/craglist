@@ -31,6 +31,15 @@ from webdriver_manager.chrome import ChromeDriverManager
 from twilio.rest import Client
 from openai import OpenAI
 
+# Database imports for saving SMS messages
+try:
+    from database import save_message
+except ImportError:
+    # If database module is not available, create a no-op function
+    def save_message(*args, **kwargs):
+        logger.warning("Database module not available - SMS messages will not be saved to database")
+        return False
+
 # Load environment variables
 load_dotenv()
 
@@ -872,11 +881,27 @@ class SalesforceIntegration:
                 logger.info(f"✓ Successfully sent to Salesforce: {vehicle['title'][:50]}")
                 return True
             else:
+                # Log detailed error information including response body
+                error_details = {
+                    'status_code': response.status_code,
+                    'response_text': response.text[:500] if response.text else 'No response body',
+                    'payload_sent': payload
+                }
                 logger.error(f"✗ Salesforce error: HTTP {response.status_code}")
+                logger.error(f"  Response: {error_details['response_text']}")
+                logger.error(f"  Payload: {json.dumps(payload, indent=2)}")
                 return False
                 
-        except Exception as e:
+        except requests.exceptions.Timeout:
+            logger.error(f"✗ Salesforce timeout: Request took longer than 10 seconds")
+            return False
+        except requests.exceptions.RequestException as e:
             logger.error(f"✗ Error sending to Salesforce: {str(e)}")
+            logger.error(f"  Exception type: {type(e).__name__}")
+            return False
+        except Exception as e:
+            logger.error(f"✗ Unexpected error sending to Salesforce: {str(e)}")
+            logger.error(f"  Exception type: {type(e).__name__}")
             return False
     
     def send_all_leads(self, qualified_leads: List[Dict]) -> Dict:
@@ -946,7 +971,16 @@ class SMSOutreach:
         return cleaned
     
     def send_sms(self, to_number: str, message: str) -> bool:
-        """Send a single SMS"""
+        """
+        Send a single SMS and save it to the database.
+        
+        Args:
+            to_number: Phone number to send message to
+            message: Message content to send
+            
+        Returns:
+            bool: True if message sent successfully, False otherwise
+        """
         try:
             formatted_number = self.format_phone(to_number)
             
@@ -957,6 +991,23 @@ class SMSOutreach:
             )
             
             logger.info(f"✓ SMS sent to {formatted_number} - SID: {message_obj.sid}")
+            
+            # Save outbound message to database so it appears in the frontend
+            # Use phone number as thread_id for consistency with messaging.py
+            thread_id = formatted_number
+            try:
+                save_message(
+                    thread_id=thread_id,
+                    phone_number=formatted_number,
+                    message_type='outbound',
+                    role='assistant',
+                    content=message
+                )
+                logger.debug(f"Saved SMS message to database for {formatted_number}")
+            except Exception as db_error:
+                # Log but don't fail the SMS send if database save fails
+                logger.warning(f"Failed to save SMS to database: {str(db_error)}")
+            
             return True
         except Exception as e:
             logger.error(f"✗ Failed to send SMS to {to_number}: {str(e)}")
