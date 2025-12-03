@@ -866,6 +866,9 @@ class SalesforceIntegration:
             "vehicle": {
                 "vin": vehicle.get('vin', ''),
                 "mileage": vehicle.get('mileage', '').replace(',', '')
+            },
+             "lead":{
+                "source": "CLB"
             }
         }
         
