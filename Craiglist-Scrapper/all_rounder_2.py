@@ -360,6 +360,10 @@ class CraigslistScraper:
                     
                     card = current_cards[index]
                     
+                    # Extract location from card BEFORE clicking (using xpath: //div[@class='meta']/text()[last()])
+                    location = self._extract_location_from_card(card)
+                    logger.info(f"Extracted location: {location}")
+                    
                     # Get listing URL before clicking
                     listing_url = self._get_listing_url(card)
                     
@@ -367,6 +371,7 @@ class CraigslistScraper:
                     if self._click_gallery_card(card):
                         vehicle_data = self._scrape_vehicle_details()
                         vehicle_data['listing_url'] = listing_url
+                        vehicle_data['location'] = location  # Add location to vehicle data
                         vehicles.append(vehicle_data)
                         
                         self._go_back_to_gallery()
@@ -424,6 +429,73 @@ class CraigslistScraper:
             return link.get_attribute("href")
         except:
             return "URL not found"
+    
+    def _extract_location_from_card(self, card_element) -> str:
+        """
+        Extract location from gallery card before clicking.
+        Uses xpath: //div[@class='meta']/text()[last()]
+        
+        Args:
+            card_element: The gallery card WebElement
+            
+        Returns:
+            str: Location text or "Not Found" if extraction fails
+        """
+        try:
+            # Find the meta div within the card element
+            meta_div = card_element.find_element(By.XPATH, ".//div[@class='meta']")
+            
+            # Get all text from the meta div
+            meta_text = meta_div.text.strip()
+            
+            # The xpath text()[last()] suggests we want the last text node
+            # In Selenium, we can get all text and split, or use JavaScript to get last text node
+            # For simplicity, we'll try to get the last part of the text
+            # If there are multiple text segments, take the last one
+            if meta_text:
+                # Split by common separators and take the last meaningful segment
+                text_parts = [part.strip() for part in meta_text.split('\n') if part.strip()]
+                if text_parts:
+                    location = text_parts[-1]  # Get last text segment
+                    logger.debug(f"Extracted location from card: {location}")
+                    return location
+            
+            # Alternative: Use JavaScript to get the last text node directly
+            try:
+                last_text_node = self.driver.execute_script(
+                    """
+                    var meta = arguments[0].querySelector('.meta');
+                    if (!meta) return '';
+                    var textNodes = [];
+                    var walker = document.createTreeWalker(
+                        meta,
+                        NodeFilter.SHOW_TEXT,
+                        null,
+                        false
+                    );
+                    var node;
+                    while (node = walker.nextNode()) {
+                        if (node.textContent.trim()) {
+                            textNodes.push(node.textContent.trim());
+                        }
+                    }
+                    return textNodes.length > 0 ? textNodes[textNodes.length - 1] : '';
+                    """,
+                    card_element
+                )
+                if last_text_node:
+                    logger.debug(f"Extracted location via JavaScript: {last_text_node}")
+                    return last_text_node
+            except Exception as js_error:
+                logger.debug(f"JavaScript extraction failed: {js_error}")
+            
+            return "Not Found"
+        except NoSuchElementException:
+            logger.debug("Meta div not found in card")
+            return "Not Found"
+        except Exception as e:
+            logger.warning(f"Error extracting location from card: {str(e)}")
+            return "Not Found"
     
     def _click_gallery_card(self, card_element) -> bool:
         """Click on a gallery card"""
@@ -873,7 +945,8 @@ class SalesforceIntegration:
             },
             "vehicle": {
                 "vin": vehicle.get('vin', ''),
-                "mileage": vehicle.get('mileage', '').replace(',', '')
+                "mileage": vehicle.get('mileage', '').replace(',', ''),
+                "location": vehicle.get('location', '')  # Location extracted from gallery card
             },
              "lead":{
                 "source": "CLB"
@@ -889,7 +962,8 @@ class SalesforceIntegration:
             )
             
             if response.status_code == 200:
-                logger.info(f"✓ Successfully sent to Salesforce: {vehicle['title'][:50]}")
+                location_info = f" | Location: {vehicle.get('location', 'N/A')}" if vehicle.get('location') else ""
+                logger.info(f"✓ Successfully sent to Salesforce: {vehicle['title'][:50]}{location_info}")
                 return True
             else:
                 # Log detailed error information including response body
@@ -1080,7 +1154,7 @@ class DataExporter:
         
         # Reorder columns for better readability
         priority_columns = ['title', 'price', 'original_price_clean', 'mmr_price', 'mmr_price_final', 'mmr_price_adjusted',
-                          'vin', 'mileage', 'phone_numbers', 'is_qualified_lead', 
+                          'vin', 'mileage', 'location', 'phone_numbers', 'is_qualified_lead', 
                           'listing_url']
         
         existing_priority = [col for col in priority_columns if col in df.columns]
