@@ -802,7 +802,10 @@ class LeadQualifier:
     def qualify_leads(vehicles: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
         """
         Separate qualified leads from non-leads
-        Qualified = Original Price <= MMR Price
+        Qualified = Original Price <= Final MMR Price (where Final MMR = Base MMR * 1.10)
+        
+        The base MMR price is multiplied by 1.10 (10% markup) to calculate the final MMR price.
+        This final MMR price is the definitive price used for all qualification comparisons.
         """
         logger.info("=" * 70)
         logger.info("QUALIFYING LEADS")
@@ -822,12 +825,17 @@ class LeadQualifier:
             
             vehicle['original_price_clean'] = original_price
             
-            # Qualify if original price is less than or equal to MMR
-            if original_price <= mmr_price:
+            # Calculate final MMR price (MMR * 1.10) - this is the final price used for qualification
+            mmr_price_final = mmr_price * 1.10
+            vehicle['mmr_price_adjusted'] = mmr_price_final
+            vehicle['mmr_price_final'] = mmr_price_final  # Store as final price for clarity
+            
+            # Qualify if original price is less than or equal to final MMR price
+            if original_price <= mmr_price_final:
                 vehicle['is_qualified_lead'] = True
                 qualified_leads.append(vehicle)
                 logger.info(f"[QUALIFIED LEAD] {vehicle['title'][:50]}")
-                logger.info(f"  Price: ${original_price:,.0f} | MMR: ${mmr_price:,.0f}")
+                logger.info(f"  Listing Price: ${original_price:,.0f} | Base MMR: ${mmr_price:,.0f} | Final MMR (x1.10): ${mmr_price_final:,.0f}")
             else:
                 vehicle['is_qualified_lead'] = False
                 non_leads.append(vehicle)
@@ -1071,7 +1079,7 @@ class DataExporter:
                 df = df.drop(columns=[col])
         
         # Reorder columns for better readability
-        priority_columns = ['title', 'price', 'original_price_clean', 'mmr_price', 
+        priority_columns = ['title', 'price', 'original_price_clean', 'mmr_price', 'mmr_price_final', 'mmr_price_adjusted',
                           'vin', 'mileage', 'phone_numbers', 'is_qualified_lead', 
                           'listing_url']
         
