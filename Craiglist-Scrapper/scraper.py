@@ -32,7 +32,7 @@ class BakersfieldCraigslistScraper:
         self._clicked_show_contact_recently = False
         
         # Target URL for Bakersfield Craigslist
-        self.target_url = "https://bakersfield.craigslist.org/search/cta?purveyor=owner#search=2~gallery~0"
+        self.target_url = "https://losangeles.craigslist.org/search/cta?bundleDuplicates=1&purveyor=owner#search=2~gallery~0"
         
         # Setup logging
         logging.basicConfig(

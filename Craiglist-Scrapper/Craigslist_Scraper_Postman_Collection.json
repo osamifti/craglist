@@ -1,0 +1,350 @@
+{
+	"info": {
+		"_postman_id": "craigslist-scraper-collection",
+		"name": "Craigslist Scraper API",
+		"description": "Postman collection for Craigslist Scraper Pipeline API",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Pipeline - Run Full",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Complete pipeline run - scraping, pricing, qualification, Salesforce, SMS"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Skip Scraping)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"skip_scraping\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run pipeline using existing CSV data (skip scraping)"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Headless Mode)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"headless\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run pipeline in headless mode (no browser GUI)"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Skip Salesforce)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"skip_salesforce\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run pipeline without sending to Salesforce"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Skip SMS)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"skip_sms\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run pipeline without sending SMS"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Custom URL)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"url\": \"https://bakersfield.craigslist.org/search/cta\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run pipeline with custom Craigslist URL"
+			}
+		},
+		{
+			"name": "Pipeline - Run (Scraping Only)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"skip_salesforce\": true,\n  \"skip_sms\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:5001/pipeline/run",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"run"
+					]
+				},
+				"description": "Run only scraping and qualification (no Salesforce, no SMS)"
+			}
+		},
+		{
+			"name": "Pipeline - Stop",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"url": {
+					"raw": "http://localhost:5001/pipeline/stop",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"pipeline",
+						"stop"
+					]
+				},
+				"description": "Stop currently running pipeline"
+			}
+		},
+		{
+			"name": "Status - Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:5001/status",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"status"
+					]
+				},
+				"description": "Check server status and pipeline state"
+			}
+		},
+		{
+			"name": "Status - With Phone",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:5001/status?phone=+1234567890",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"status"
+					],
+					"query": [
+						{
+							"key": "phone",
+							"value": "+1234567890"
+						}
+					]
+				},
+				"description": "Check status with phone number to get thread ID"
+			}
+		},
+		{
+			"name": "API - Info",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:5001/api",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"api"
+					]
+				},
+				"description": "Get API information and available endpoints"
+			}
+		},
+		{
+			"name": "Conversations - All",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:5001/api/conversations",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"api",
+						"conversations"
+					]
+				},
+				"description": "Get all conversation threads"
+			}
+		},
+		{
+			"name": "Conversations - By Thread",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:5001/api/conversations/{{thread_id}}",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "5001",
+					"path": [
+						"api",
+						"conversations",
+						"{{thread_id}}"
+					]
+				},
+				"description": "Get messages for a specific thread (replace {{thread_id}} with actual thread ID)"
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5001",
+			"type": "string"
+		}
+	]
+}
+

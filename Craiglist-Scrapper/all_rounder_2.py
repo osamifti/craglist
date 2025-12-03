@@ -63,7 +63,7 @@ class PipelineConfig:
     """Centralized configuration for the entire pipeline"""
     
     # Craigslist Settings
-    TARGET_URL = "https://bakersfield.craigslist.org/search/cta?purveyor=owner#search=2~gallery~0"
+    TARGET_URL = "https://losangeles.craigslist.org/search/cta?bundleDuplicates=1&purveyor=owner#search=2~gallery~0"
     HEADLESS_MODE = False
     
     # Manheim API
