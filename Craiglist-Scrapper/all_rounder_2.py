@@ -961,7 +961,7 @@ class SalesforceIntegration:
             "vehicle": {
                 "vin": vehicle.get('vin', ''),
                 "mileage": vehicle.get('mileage', '').replace(',', ''),
-                "location": vehicle.get('location', '')  # Location extracted from gallery card
+                "car_location": vehicle.get('location', '')  # Location extracted from gallery card
             },
              "lead":{
                 "source": "CLB"
