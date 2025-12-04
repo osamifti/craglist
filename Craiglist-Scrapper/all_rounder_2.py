@@ -929,12 +929,27 @@ class SalesforceIntegration:
         self.config = config
     
     def send_lead(self, vehicle: Dict) -> bool:
-        """Send a single lead to Salesforce"""
+        """
+        Send a single lead to Salesforce.
+        
+        Requirements:
+        - Lead must have a phone number (required for Salesforce submission)
+        - Lead must be qualified (price <= MMR_price * 1.10)
+        
+        Args:
+            vehicle: Vehicle dictionary with lead information
+            
+        Returns:
+            bool: True if sent successfully, False otherwise
+        """
+        # Validate phone number requirement - CRITICAL: No phone = No Salesforce submission
+        primary_phone = vehicle.get('phone_numbers', '')
+        if not primary_phone or not primary_phone.strip():
+            logger.warning(f"Cannot send to Salesforce (no phone number): {vehicle.get('title', 'Unknown')[:50]}")
+            return False
+        
         # Parse name from title (fallback to generic if not found)
         first_name, last_name = self._parse_name(vehicle['title'])
-        
-        # Get phone number (now it's a string, not a list)
-        primary_phone = vehicle.get('phone_numbers', '')
         
         payload = {
             "contact": {
@@ -990,9 +1005,26 @@ class SalesforceIntegration:
             return False
     
     def send_all_leads(self, qualified_leads: List[Dict]) -> Dict:
-        """Send all qualified leads to Salesforce"""
+        """
+        Send all qualified leads to Salesforce.
+        
+        IMPORTANT: Only leads with BOTH of the following will be sent:
+        1. Phone number (required - leads without phone numbers are skipped)
+        2. Qualified status (price <= MMR_price * 1.10)
+        
+        Leads without phone numbers will be skipped even if they are qualified
+        and have a VIN number.
+        
+        Args:
+            qualified_leads: List of qualified lead dictionaries
+            
+        Returns:
+            Dict with 'sent', 'failed', and 'skipped' counts
+        """
         logger.info("=" * 70)
         logger.info("SENDING LEADS TO SALESFORCE")
+        logger.info("=" * 70)
+        logger.info("NOTE: Only leads with phone numbers will be sent to Salesforce")
         logger.info("=" * 70)
         
         results = {
@@ -1001,13 +1033,23 @@ class SalesforceIntegration:
             'skipped': 0
         }
         
+        # Count leads without phone numbers before processing
+        leads_without_phone = sum(1 for lead in qualified_leads 
+                                  if not lead.get('phone_numbers') or not str(lead.get('phone_numbers', '')).strip())
+        
+        if leads_without_phone > 0:
+            logger.info(f"Found {leads_without_phone} qualified lead(s) without phone numbers - these will be skipped")
+        
         for lead in qualified_leads:
-            # Skip if no phone number
-            if not lead.get('phone_numbers'):
-                logger.warning(f"Skipping (no phone): {lead['title'][:50]}")
+            # Validate phone number requirement - CRITICAL CHECK
+            # Skip leads without phone numbers even if they have VIN and are qualified
+            phone_number = lead.get('phone_numbers', '')
+            if not phone_number or not str(phone_number).strip():
+                logger.warning(f"Skipping Salesforce submission (no phone number): {lead.get('title', 'Unknown')[:50]} | VIN: {lead.get('vin', 'N/A')}")
                 results['skipped'] += 1
                 continue
             
+            # Send lead to Salesforce (send_lead will also validate phone number)
             if self.send_lead(lead):
                 results['sent'] += 1
             else:
@@ -1015,7 +1057,7 @@ class SalesforceIntegration:
             
             time.sleep(self.config.API_DELAY)
         
-        logger.info(f"Salesforce Results: {results['sent']} sent, {results['failed']} failed, {results['skipped']} skipped")
+        logger.info(f"Salesforce Results: {results['sent']} sent, {results['failed']} failed, {results['skipped']} skipped (no phone)")
         return results
     
     @staticmethod
