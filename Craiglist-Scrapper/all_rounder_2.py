@@ -319,15 +319,12 @@ class CraigslistScraper:
     
     def scrape_listings(self) -> List[Dict]:
         """
-        Scrape all vehicle listings from Craigslist using infinite scroll.
-        Scrapes in batches: scrapes visible listings, scrolls to load more, waits 5 seconds,
-        then continues until all listings are scraped.
-        
+        Scrape all vehicle listings from Craigslist
         Returns list of vehicle dictionaries
         """
         try:
             logger.info("=" * 70)
-            logger.info("STARTING CRAIGSLIST SCRAPING WITH INFINITE SCROLL")
+            logger.info("STARTING CRAIGSLIST SCRAPING")
             logger.info("=" * 70)
             
             # Navigate to target URL
@@ -340,122 +337,52 @@ class CraigslistScraper:
             self._click_bundle_duplicates()
             time.sleep(5)
             
-            vehicles = []
-            scraped_urls = set()  # Track scraped URLs to avoid duplicates
-            batch_number = 1
-            no_new_listings_count = 0
-            max_no_new_attempts = 3  # Stop after 3 scrolls with no new listings
+            # Get all gallery cards
+            gallery_cards = self._get_gallery_cards()
+            total_cards = len(gallery_cards)
+            logger.info(f"Found {total_cards} vehicle listings to scrape")
             
-            while True:
-                # Check for stop request
+            # Scrape each listing
+            vehicles = []
+            for index in range(total_cards):
+                # Check for stop request before processing each listing
                 if self.stop_check and self.stop_check():
-                    logger.info(f"Stop requested. Scraped {len(vehicles)} vehicles before stopping.")
+                    logger.info(f"Stop requested. Processed {len(vehicles)}/{total_cards} listings before stopping.")
                     break
                 
-                logger.info("=" * 70)
-                logger.info(f"BATCH {batch_number}: Loading and scraping visible listings...")
-                logger.info("=" * 70)
-                
-                # Get all currently visible gallery cards
-                current_cards = self._get_gallery_cards()
-                current_count = len(current_cards)
-                logger.info(f"Found {current_count} visible gallery cards in this batch")
-                
-                if current_count == 0:
-                    logger.warning("No gallery cards found. May have reached end of listings.")
-                    break
-                
-                # Extract URLs from all visible cards to identify new ones
-                current_batch_urls = {}
-                for idx, card in enumerate(current_cards):
-                    try:
-                        listing_url = self._get_listing_url(card)
-                        if listing_url and listing_url != "URL not found":
-                            current_batch_urls[listing_url] = (card, idx)
-                    except Exception as e:
-                        logger.debug(f"Error extracting URL from card {idx}: {str(e)}")
-                        continue
-                
-                # Filter to only new URLs we haven't scraped yet
-                new_urls = {url: data for url, data in current_batch_urls.items() if url not in scraped_urls}
-                
-                if not new_urls:
-                    no_new_listings_count += 1
-                    logger.info(f"No new listings found in this batch (attempt {no_new_listings_count}/{max_no_new_attempts})")
-                    
-                    if no_new_listings_count >= max_no_new_attempts:
-                        logger.info(f"Reached maximum attempts without new listings. Total scraped: {len(vehicles)}")
-                        break
-                else:
-                    no_new_listings_count = 0  # Reset counter if we found new listings
-                    logger.info(f"Found {len(new_urls)} new listings to scrape in this batch")
-                
-                # Scrape each new listing
-                new_urls_list = list(new_urls.items())
-                for url_index, (listing_url, (card, card_index)) in enumerate(new_urls_list, 1):
-                    # Check for stop request before processing each listing
-                    if self.stop_check and self.stop_check():
-                        logger.info(f"Stop requested. Scraped {len(vehicles)} vehicles before stopping.")
-                        break
-                    
-                    try:
-                        logger.info(f"Batch {batch_number} - Processing listing {url_index}/{len(new_urls_list)} (Total scraped: {len(vehicles)})")
-                        
-                        # Extract location from card BEFORE clicking
-                        location = self._extract_location_from_card(card)
-                        logger.debug(f"Extracted location: {location}")
-                        
-                        # Click and scrape
-                        if self._click_gallery_card(card):
-                            vehicle_data = self._scrape_vehicle_details()
-                            vehicle_data['listing_url'] = listing_url
-                            vehicle_data['location'] = location
-                            vehicles.append(vehicle_data)
-                            
-                            # Mark this URL as scraped
-                            scraped_urls.add(listing_url)
-                            
-                            self._go_back_to_gallery()
-                        
-                        time.sleep(self.config.SCRAPING_DELAY)
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing listing in batch {batch_number}: {str(e)}")
-                        continue
-                
-                # After scraping batch, scroll to load more listings
-                logger.info(f"Batch {batch_number} complete. Scraped {len(new_urls)} listings (Total: {len(vehicles)})")
-                logger.info("Waiting 5 seconds, then scrolling to load more listings...")
-                time.sleep(5)
-                
-                # Scroll down to trigger loading more content
                 try:
-                    # Scroll to bottom of page to load more listings
-                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    logger.info("Scrolled to bottom of page")
+                    logger.info(f"Processing listing {index + 1}/{total_cards}")
                     
-                    # Wait for new content to load
-                    time.sleep(3)
+                    # Re-fetch cards to avoid stale references
+                    current_cards = self._get_gallery_cards()
+                    if index >= len(current_cards):
+                        break
                     
-                    # Also try scrolling by a fixed amount in case the page uses viewport-based loading
-                    self.driver.execute_script("window.scrollBy(0, 1000);")
-                    time.sleep(2)
+                    card = current_cards[index]
+                    
+                    # Extract location from card BEFORE clicking (using xpath: //div[@class='meta']/text()[last()])
+                    location = self._extract_location_from_card(card)
+                    logger.info(f"Extracted location: {location}")
+                    
+                    # Get listing URL before clicking
+                    listing_url = self._get_listing_url(card)
+                    
+                    # Click and scrape
+                    if self._click_gallery_card(card):
+                        vehicle_data = self._scrape_vehicle_details()
+                        vehicle_data['listing_url'] = listing_url
+                        vehicle_data['location'] = location  # Add location to vehicle data
+                        vehicles.append(vehicle_data)
+                        
+                        self._go_back_to_gallery()
+                    
+                    time.sleep(self.config.SCRAPING_DELAY)
                     
                 except Exception as e:
-                    logger.warning(f"Error during scroll: {str(e)}")
-                
-                batch_number += 1
-                
-                # Safety check: prevent infinite loops
-                if batch_number > 100:  # Max 100 batches (should handle 20,000+ listings)
-                    logger.warning(f"Reached maximum batch limit ({batch_number}). Stopping scroll loop.")
-                    break
+                    logger.error(f"Error processing listing {index + 1}: {str(e)}")
+                    continue
             
-            logger.info("=" * 70)
-            logger.info(f"SCRAPING COMPLETE: Successfully scraped {len(vehicles)} vehicles")
-            logger.info(f"Total unique listings processed: {len(scraped_urls)}")
-            logger.info("=" * 70)
-            
+            logger.info(f"Successfully scraped {len(vehicles)} vehicles")
             return vehicles
             
         except Exception as e:
