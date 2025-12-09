@@ -33,11 +33,14 @@ from openai import OpenAI
 
 # Database imports for saving SMS messages
 try:
-    from database import save_message
+    from database import save_message, phone_number_exists
 except ImportError:
     # If database module is not available, create a no-op function
     def save_message(*args, **kwargs):
         logger.warning("Database module not available - SMS messages will not be saved to database")
+        return False
+    def phone_number_exists(*args, **kwargs):
+        logger.warning("Database module not available - cannot check if phone number exists")
         return False
 
 # Load environment variables
@@ -1141,15 +1144,26 @@ class SMSOutreach:
             return False
     
     def contact_qualified_leads(self, qualified_leads: List[Dict]) -> Dict:
-        """Send SMS to all qualified leads"""
+        """
+        Send SMS to all qualified leads.
+        
+        IMPORTANT: Before sending SMS, checks if the phone number already exists in the database.
+        If the phone number is already present in the database, the SMS will be skipped to avoid
+        duplicate outreach to the same contact.
+        
+        Only sends SMS to phone numbers that are NOT in the database.
+        """
         logger.info("=" * 70)
         logger.info("SENDING SMS TO QUALIFIED LEADS")
+        logger.info("=" * 70)
+        logger.info("NOTE: Phone numbers already in database will be skipped")
         logger.info("=" * 70)
         
         results = {
             'sent': 0,
             'failed': 0,
-            'no_phone': 0
+            'no_phone': 0,
+            'already_exists': 0  # Track phone numbers that already exist in DB
         }
         
         for lead in qualified_leads:
@@ -1159,7 +1173,21 @@ class SMSOutreach:
                 results['no_phone'] += 1
                 continue
             
-            logger.info(f"Contacting: {lead['title'][:50]}")
+            # Format phone number to E.164 for consistent database checking
+            formatted_number = self.format_phone(phone)
+            
+            # Check if phone number already exists in database
+            try:
+                if phone_number_exists(formatted_number):
+                    logger.info(f"⏭ Skipping {formatted_number} - phone number already exists in database")
+                    logger.info(f"   Vehicle: {lead['title'][:50]}")
+                    results['already_exists'] += 1
+                    continue
+            except Exception as check_error:
+                # If check fails, log warning but continue (fail-safe approach)
+                logger.warning(f"Error checking if phone number exists: {check_error}. Proceeding with SMS send.")
+            
+            logger.info(f"Contacting: {lead['title'][:50]} | Phone: {formatted_number}")
             
             if self.send_sms(phone, self.config.INITIAL_MESSAGE):
                 results['sent'] += 1
@@ -1168,7 +1196,7 @@ class SMSOutreach:
             
             time.sleep(self.config.API_DELAY)
         
-        logger.info(f"SMS Results: {results['sent']} sent, {results['failed']} failed, {results['no_phone']} no phone")
+        logger.info(f"SMS Results: {results['sent']} sent, {results['failed']} failed, {results['no_phone']} no phone, {results['already_exists']} already in DB (skipped)")
         return results
 
 

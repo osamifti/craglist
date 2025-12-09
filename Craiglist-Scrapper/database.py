@@ -578,3 +578,75 @@ def get_messages_by_type(thread_id: str, message_type: str) -> List[Dict]:
         if conn:
             conn.close()
 
+
+def phone_number_exists(phone_number: str) -> bool:
+    """
+    Check if a phone number already exists in the database.
+    
+    This function checks if there are any conversations (messages) associated with
+    the given phone number. If any messages exist for this phone number, it means
+    the number has been contacted before.
+    
+    Args:
+        phone_number: Phone number to check (can be in any format, will be normalized for comparison)
+    
+    Returns:
+        bool: True if phone number exists in database, False otherwise
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Normalize phone number for comparison - remove common formatting characters
+        # This handles variations like +1-555-123-4567, (555) 123-4567, 5551234567, etc.
+        normalized_phone = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+        
+        # Check if phone number exists in database
+        # Try exact match first
+        select_query = """
+        SELECT COUNT(*) as count
+        FROM conversations
+        WHERE phone_number = %s
+        LIMIT 1
+        """
+        
+        cursor.execute(select_query, (phone_number,))
+        result = cursor.fetchone()
+        
+        if result and result[0] > 0:
+            logger.debug(f"Phone number {phone_number} found in database (exact match)")
+            return True
+        
+        # If exact match fails, try normalized comparison
+        # This handles cases where phone numbers might be stored in different formats
+        # Get all phone numbers and compare normalized versions
+        cursor.execute("SELECT DISTINCT phone_number FROM conversations")
+        all_phones = cursor.fetchall()
+        
+        for db_phone_tuple in all_phones:
+            db_phone = db_phone_tuple[0] if db_phone_tuple else ''
+            if db_phone:
+                # Normalize database phone number
+                normalized_db_phone = ''.join(c for c in str(db_phone) if c.isdigit() or c == '+')
+                # Compare last 10 digits (removing country code variations)
+                phone_digits = normalized_phone[-10:] if len(normalized_phone) >= 10 else normalized_phone
+                db_phone_digits = normalized_db_phone[-10:] if len(normalized_db_phone) >= 10 else normalized_db_phone
+                
+                if phone_digits == db_phone_digits and len(phone_digits) == 10:
+                    logger.debug(f"Phone number {phone_number} found in database (normalized match with {db_phone})")
+                    return True
+        
+        logger.debug(f"Phone number {phone_number} not found in database")
+        return False
+        
+    except Error as e:
+        logger.error(f"Error checking if phone number exists: {e}")
+        # On error, return False to allow sending (fail-safe approach)
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
