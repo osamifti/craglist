@@ -1,0 +1,39 @@
+[33mcommit 747731e7f8758bc6316cf6f6d6e62be9d31901f8[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+AuthorDate: Thu Dec 4 22:11:26 2025 +0500
+Commit:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+CommitDate: Thu Dec 4 22:11:26 2025 +0500
+
+    salesforce-changes-reverted
+
+[33mcommit 94dc5ab447e1c68eb0f1a43e61c67393dc1a14c3[m
+Author:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+AuthorDate: Thu Dec 4 22:00:31 2025 +0500
+Commit:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+CommitDate: Thu Dec 4 22:00:31 2025 +0500
+
+    listing-scrolling
+
+[33mcommit 46755690a4bf95b19b07af3b44d9e98b30667372[m
+Author:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+AuthorDate: Thu Dec 4 19:41:45 2025 +0500
+Commit:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+CommitDate: Thu Dec 4 19:41:45 2025 +0500
+
+    car-location-object-created
+
+[33mcommit b109921ad9a200425bb6ddff1bc5037c180b2b7e[m
+Author:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+AuthorDate: Thu Dec 4 05:43:37 2025 +0500
+Commit:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+CommitDate: Thu Dec 4 05:43:37 2025 +0500
+
+    Phone-Number-Logic-Implemented
+
+[33mcommit 59f158ba95af17467d039b2e2eaa4064d69efc96[m
+Author:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+AuthorDate: Thu Dec 4 04:03:14 2025 +0500
+Commit:     hafizfaizan9991 <hafiz.faizan@hatzs.com>
+CommitDate: Thu Dec 4 04:03:14 2025 +0500
+
+    location-fixed
