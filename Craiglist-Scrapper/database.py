@@ -45,15 +45,48 @@ def get_connection_pool():
     
     Returns:
         MySQLConnectionPool: The connection pool instance
+    
+    Raises:
+        Error: If connection pool cannot be created
     """
     global connection_pool
     if connection_pool is None:
+        # Validate database configuration before attempting connection
+        if not DB_HOST:
+            error_msg = "DB_HOST environment variable is not set or is empty. Please check your .env file."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        if not DB_USER:
+            error_msg = "DB_USER environment variable is not set or is empty. Please check your .env file."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        if not DB_NAME:
+            error_msg = "DB_NAME environment variable is not set or is empty. Please check your .env file."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Fix common Windows MySQL connection issue: "." should be "localhost"
+        fixed_host = DB_HOST
+        if DB_HOST == "." or DB_HOST == "":
+            fixed_host = "localhost"
+            logger.warning(f"DB_HOST was '{DB_HOST}', changing to 'localhost' for proper MySQL connection")
+            # Update pool_config with fixed host
+            pool_config['host'] = fixed_host
+        
         try:
             connection_pool = pooling.MySQLConnectionPool(**pool_config)
-            logger.info("Database connection pool created successfully")
+            logger.info(f"Database connection pool created successfully (Host: {fixed_host}, Database: {DB_NAME})")
         except Error as e:
-            logger.error(f"Error creating connection pool: {e}")
-            raise
+            error_msg = f"Error creating connection pool: {e}"
+            logger.error(error_msg)
+            logger.error(f"Connection config - Host: {fixed_host}, User: {DB_USER}, Database: {DB_NAME}, Port: {DB_PORT}")
+            logger.error("Please verify:")
+            logger.error("  1. MySQL server is running")
+            logger.error("  2. Database credentials in .env file are correct")
+            logger.error("  3. Database exists and user has proper permissions")
+            raise ValueError(error_msg) from e
     return connection_pool
 
 

@@ -876,11 +876,26 @@ class LeadQualifier:
     @staticmethod
     def qualify_leads(vehicles: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
         """
-        Separate qualified leads from non-leads
-        Qualified = Original Price <= Final MMR Price (where Final MMR = Base MMR * 1.10)
+        Separate qualified leads from non-leads.
         
-        The base MMR price is multiplied by 1.10 (10% markup) to calculate the final MMR price.
-        This final MMR price is the definitive price used for all qualification comparisons.
+        Qualification Criteria:
+        1. For vehicles WITH VIN:
+           - Must have price and MMR
+           - Must have phone number (disqualify if VIN exists but no phone)
+           - Price <= Final MMR Price (where Final MMR = Base MMR * 1.10)
+           - These leads go to SALESFORCE ONLY (no SMS)
+        
+        2. For vehicles WITHOUT VIN but WITH PHONE:
+           - Must have phone number
+           - These leads are qualified for SMS outreach (no MMR check needed)
+        
+        3. For vehicles WITHOUT VIN and WITHOUT PHONE:
+           - Disqualified (cannot contact)
+        
+        IMPORTANT: 
+        - Vehicles with VIN + Phone + qualified = Salesforce only (skip SMS)
+        - Vehicles with Phone but no VIN = SMS outreach (no Salesforce)
+        - Vehicles with VIN but no phone = Disqualified
         """
         logger.info("=" * 70)
         logger.info("QUALIFYING LEADS")
@@ -892,28 +907,65 @@ class LeadQualifier:
         for vehicle in vehicles:
             original_price = LeadQualifier.clean_price(vehicle.get('price', ''))
             mmr_price = vehicle.get('mmr_price')
+            vin = vehicle.get('vin', '').strip()
+            phone_number = vehicle.get('phone_numbers', '').strip() if vehicle.get('phone_numbers') else ''
             
-            # Skip if missing critical data
-            if original_price is None or mmr_price is None:
-                non_leads.append(vehicle)
-                continue
+            has_vin = vin and vin.lower() != 'not found'
+            has_phone = bool(phone_number)
             
-            vehicle['original_price_clean'] = original_price
+            # CASE 1: Vehicle has VIN
+            if has_vin:
+                # If VIN exists but no phone, disqualify
+                if not has_phone:
+                    vehicle['is_qualified_lead'] = False
+                    vehicle['disqualification_reason'] = 'Has VIN but no phone number'
+                    non_leads.append(vehicle)
+                    logger.info(f"[DISQUALIFIED] {vehicle.get('title', 'Unknown')[:50]}")
+                    logger.info(f"  Reason: Has VIN ({vin[:17]}...) but no phone number - cannot contact seller")
+                    continue
+                
+                # Vehicle has both VIN and phone - check price vs MMR
+                if original_price is None or mmr_price is None:
+                    logger.debug(f"Disqualified - Has VIN but missing price or MMR: {vehicle.get('title', 'Unknown')[:50]}")
+                    non_leads.append(vehicle)
+                    continue
+                
+                vehicle['original_price_clean'] = original_price
+                
+                # Calculate final MMR price (MMR * 1.10)
+                mmr_price_final = mmr_price * 1.10
+                vehicle['mmr_price_adjusted'] = mmr_price_final
+                vehicle['mmr_price_final'] = mmr_price_final
+                
+                # Qualify if price <= final MMR
+                if original_price <= mmr_price_final:
+                    vehicle['is_qualified_lead'] = True
+                    vehicle['salesforce_only'] = True  # Mark for Salesforce only (no SMS)
+                    qualified_leads.append(vehicle)
+                    logger.info(f"[QUALIFIED LEAD - SALESFORCE ONLY] {vehicle.get('title', 'Unknown')[:50]}")
+                    logger.info(f"  Listing Price: ${original_price:,.0f} | Base MMR: ${mmr_price:,.0f} | Final MMR (x1.10): ${mmr_price_final:,.0f}")
+                    logger.info(f"  VIN: {vin[:17]}... | Phone: {phone_number} | Action: Salesforce only (SMS skipped)")
+                else:
+                    vehicle['is_qualified_lead'] = False
+                    vehicle['disqualification_reason'] = 'Listing price exceeds final MMR price'
+                    non_leads.append(vehicle)
             
-            # Calculate final MMR price (MMR * 1.10) - this is the final price used for qualification
-            mmr_price_final = mmr_price * 1.10
-            vehicle['mmr_price_adjusted'] = mmr_price_final
-            vehicle['mmr_price_final'] = mmr_price_final  # Store as final price for clarity
-            
-            # Qualify if original price is less than or equal to final MMR price
-            if original_price <= mmr_price_final:
+            # CASE 2: Vehicle has phone but NO VIN - qualify for SMS outreach
+            elif has_phone:
                 vehicle['is_qualified_lead'] = True
+                vehicle['sms_only'] = True  # Mark for SMS only (no Salesforce, no MMR check)
                 qualified_leads.append(vehicle)
-                logger.info(f"[QUALIFIED LEAD] {vehicle['title'][:50]}")
-                logger.info(f"  Listing Price: ${original_price:,.0f} | Base MMR: ${mmr_price:,.0f} | Final MMR (x1.10): ${mmr_price_final:,.0f}")
+                logger.info(f"[QUALIFIED LEAD - SMS ONLY] {vehicle.get('title', 'Unknown')[:50]}")
+                logger.info(f"  Phone: {phone_number} | No VIN - qualified for SMS outreach")
+                if original_price:
+                    logger.info(f"  Listing Price: ${original_price:,.0f} (MMR not available - no VIN)")
+            
+            # CASE 3: Vehicle has neither VIN nor phone - disqualify
             else:
                 vehicle['is_qualified_lead'] = False
+                vehicle['disqualification_reason'] = 'No VIN and no phone number - cannot contact'
                 non_leads.append(vehicle)
+                logger.debug(f"Disqualified - No VIN and no phone: {vehicle.get('title', 'Unknown')[:50]}")
         
         logger.info(f"Qualified Leads: {len(qualified_leads)}")
         logger.info(f"Non-Leads: {len(non_leads)}")
@@ -1009,14 +1061,15 @@ class SalesforceIntegration:
     
     def send_all_leads(self, qualified_leads: List[Dict]) -> Dict:
         """
-        Send all qualified leads to Salesforce.
+        Send qualified leads to Salesforce.
         
-        IMPORTANT: Only leads with BOTH of the following will be sent:
-        1. Phone number (required - leads without phone numbers are skipped)
-        2. Qualified status (price <= MMR_price * 1.10)
+        IMPORTANT RULES:
+        1. Only leads WITH VIN will be sent to Salesforce (leads without VIN are SMS-only)
+        2. Leads must have phone number (required)
+        3. Leads must be qualified (price <= MMR_price * 1.10 if VIN exists)
         
-        Leads without phone numbers will be skipped even if they are qualified
-        and have a VIN number.
+        Leads without VIN are skipped from Salesforce (they are SMS-only leads).
+        Leads without phone numbers are skipped even if they have VIN.
         
         Args:
             qualified_leads: List of qualified lead dictionaries
@@ -1027,14 +1080,23 @@ class SalesforceIntegration:
         logger.info("=" * 70)
         logger.info("SENDING LEADS TO SALESFORCE")
         logger.info("=" * 70)
-        logger.info("NOTE: Only leads with phone numbers will be sent to Salesforce")
+        logger.info("NOTE: Only leads with VIN will be sent to Salesforce")
+        logger.info("NOTE: Leads without VIN are SMS-only (not sent to Salesforce)")
         logger.info("=" * 70)
         
         results = {
             'sent': 0,
             'failed': 0,
-            'skipped': 0
+            'skipped': 0,
+            'no_vin_skipped': 0  # Track leads without VIN (SMS-only)
         }
+        
+        # Count leads without VIN before processing
+        leads_without_vin = sum(1 for lead in qualified_leads 
+                               if not lead.get('vin') or lead.get('vin', '').strip().lower() == 'not found')
+        
+        if leads_without_vin > 0:
+            logger.info(f"Found {leads_without_vin} qualified lead(s) without VIN - these are SMS-only (skipped from Salesforce)")
         
         # Count leads without phone numbers before processing
         leads_without_phone = sum(1 for lead in qualified_leads 
@@ -1044,15 +1106,24 @@ class SalesforceIntegration:
             logger.info(f"Found {leads_without_phone} qualified lead(s) without phone numbers - these will be skipped")
         
         for lead in qualified_leads:
+            vin = lead.get('vin', '').strip()
+            has_vin = vin and vin.lower() != 'not found'
+            
+            # SKIP leads without VIN - these are SMS-only, not Salesforce leads
+            if not has_vin:
+                logger.debug(f"Skipping Salesforce (no VIN - SMS only): {lead.get('title', 'Unknown')[:50]}")
+                results['no_vin_skipped'] += 1
+                continue
+            
             # Validate phone number requirement - CRITICAL CHECK
-            # Skip leads without phone numbers even if they have VIN and are qualified
             phone_number = lead.get('phone_numbers', '')
             if not phone_number or not str(phone_number).strip():
-                logger.warning(f"Skipping Salesforce submission (no phone number): {lead.get('title', 'Unknown')[:50]} | VIN: {lead.get('vin', 'N/A')}")
+                logger.warning(f"Skipping Salesforce submission (no phone number): {lead.get('title', 'Unknown')[:50]} | VIN: {vin[:17]}...")
                 results['skipped'] += 1
                 continue
             
-            # Send lead to Salesforce (send_lead will also validate phone number)
+            # Send lead to Salesforce (lead has both VIN and phone)
+            logger.info(f"Sending to Salesforce: {lead.get('title', 'Unknown')[:50]} | VIN: {vin[:17]}... | Phone: {phone_number}")
             if self.send_lead(lead):
                 results['sent'] += 1
             else:
@@ -1060,7 +1131,7 @@ class SalesforceIntegration:
             
             time.sleep(self.config.API_DELAY)
         
-        logger.info(f"Salesforce Results: {results['sent']} sent, {results['failed']} failed, {results['skipped']} skipped (no phone)")
+        logger.info(f"Salesforce Results: {results['sent']} sent, {results['failed']} failed, {results['skipped']} skipped (no phone), {results['no_vin_skipped']} skipped (no VIN - SMS only)")
         return results
     
     @staticmethod
@@ -1133,10 +1204,14 @@ class SMSOutreach:
                     role='assistant',
                     content=message
                 )
-                logger.debug(f"Saved SMS message to database for {formatted_number}")
+                logger.info(f"✓ Saved SMS message to database for {formatted_number}")
             except Exception as db_error:
-                # Log but don't fail the SMS send if database save fails
-                logger.warning(f"Failed to save SMS to database: {str(db_error)}")
+                # CRITICAL: Log error prominently so user knows messages aren't being saved
+                # SMS was sent successfully via Twilio, but won't appear in frontend without database
+                logger.error(f"✗ CRITICAL: Failed to save SMS to database for {formatted_number}")
+                logger.error(f"  Error: {str(db_error)}")
+                logger.error(f"  SMS was sent successfully via Twilio, but will NOT appear in frontend!")
+                logger.error(f"  Please fix database connection to save future messages.")
             
             return True
         except Exception as e:
@@ -1145,17 +1220,23 @@ class SMSOutreach:
     
     def contact_qualified_leads(self, qualified_leads: List[Dict]) -> Dict:
         """
-        Send SMS to all qualified leads.
+        Send SMS to qualified leads.
         
-        IMPORTANT: Before sending SMS, checks if the phone number already exists in the database.
-        If the phone number is already present in the database, the SMS will be skipped to avoid
-        duplicate outreach to the same contact.
+        IMPORTANT RULES:
+        1. SKIP leads with VIN (these go to Salesforce only, not SMS)
+        2. Only send SMS to leads with phone but NO VIN
+        3. Before sending, check if phone number already exists in database
+        4. Skip SMS if phone number was already contacted
         
-        Only sends SMS to phone numbers that are NOT in the database.
+        Only sends SMS to:
+        - Leads with phone number
+        - Leads WITHOUT VIN (leads with VIN are Salesforce-only)
+        - Phone numbers NOT already in database
         """
         logger.info("=" * 70)
         logger.info("SENDING SMS TO QUALIFIED LEADS")
         logger.info("=" * 70)
+        logger.info("NOTE: Leads with VIN are skipped (Salesforce only)")
         logger.info("NOTE: Phone numbers already in database will be skipped")
         logger.info("=" * 70)
         
@@ -1163,12 +1244,23 @@ class SMSOutreach:
             'sent': 0,
             'failed': 0,
             'no_phone': 0,
+            'has_vin_skipped': 0,  # Track leads with VIN that are skipped (Salesforce only)
             'already_exists': 0  # Track phone numbers that already exist in DB
         }
         
         for lead in qualified_leads:
             phone = lead.get('phone_numbers', '')
+            vin = lead.get('vin', '').strip()
+            has_vin = vin and vin.lower() != 'not found'
             
+            # SKIP leads with VIN - these go to Salesforce only, not SMS
+            if has_vin:
+                logger.info(f"⏭ Skipping SMS - Lead has VIN (Salesforce only): {lead.get('title', 'Unknown')[:50]}")
+                logger.info(f"   VIN: {vin[:17]}... | Phone: {phone}")
+                results['has_vin_skipped'] += 1
+                continue
+            
+            # Only process leads without VIN
             if not phone:
                 results['no_phone'] += 1
                 continue
@@ -1187,7 +1279,7 @@ class SMSOutreach:
                 # If check fails, log warning but continue (fail-safe approach)
                 logger.warning(f"Error checking if phone number exists: {check_error}. Proceeding with SMS send.")
             
-            logger.info(f"Contacting: {lead['title'][:50]} | Phone: {formatted_number}")
+            logger.info(f"Contacting: {lead['title'][:50]} | Phone: {formatted_number} (No VIN - SMS outreach)")
             
             if self.send_sms(phone, self.config.INITIAL_MESSAGE):
                 results['sent'] += 1
@@ -1196,7 +1288,7 @@ class SMSOutreach:
             
             time.sleep(self.config.API_DELAY)
         
-        logger.info(f"SMS Results: {results['sent']} sent, {results['failed']} failed, {results['no_phone']} no phone, {results['already_exists']} already in DB (skipped)")
+        logger.info(f"SMS Results: {results['sent']} sent, {results['failed']} failed, {results['no_phone']} no phone, {results['has_vin_skipped']} skipped (has VIN - Salesforce only), {results['already_exists']} already in DB (skipped)")
         return results
 
 
