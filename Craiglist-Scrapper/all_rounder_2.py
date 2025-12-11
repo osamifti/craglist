@@ -85,7 +85,7 @@ class PipelineConfig:
     # OpenAI Settings
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     INITIAL_MESSAGE = os.getenv('INITIAL_MESSAGE', 
-        "Hello this is Carly from Car Trackers, I'm reaching out for your vehicle that you have posted on Craigslist for sale. Could you please share the VIN number of your vehicle?")
+        "Hi, I'm interested in your car for sale at your asking price. Do you mind sending me the vin so I can run a carfax on it?")
     
     # Output Files
     SCRAPED_DATA_FILE = f"scraped_vehicles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"

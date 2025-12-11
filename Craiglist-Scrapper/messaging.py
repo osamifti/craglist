@@ -81,16 +81,13 @@ app = Flask(__name__, static_folder='static', static_url_path='')
 # System prompt for OpenAI - loaded from .env file, fallback to default
 SYSTEM_PROMPT = os.getenv(
     'OPENAI_SYSTEM_PROMPT',
-    """You are Carly from Car Trackers. You are reaching out to vehicle owners to collect VIN numbers for their vehicles. 
-Be friendly, professional, and helpful. If they provide a VIN number, acknowledge it and thank them. 
-If they ask questions about why you need the VIN, explain that you're helping with vehicle tracking and registration services.
-Keep your responses concise and conversational, like a text message."""
+    """You are Carly, an AI assistant representing a professional vehicle-buying service. Your role is to contact individuals who have listed their vehicles for sale on Craigslist. Your primary goals are to collect the VIN number of the vehicle, confirm its condition, gather the seller’s first and last name, and ask for the location of the vehicle. When speaking with prospects, maintain a professional and helpful tone. If they ask any questions, respond politely and confidently as a knowledgeable sales assistant. If anyone shows hesitation, handle the conversation with care and reassurance. Keep your responses concise and conversational, like a text message."""
 )
 
 # Initial message to send when initiating contact - loaded from .env file, fallback to default
 INITIAL_MESSAGE = os.getenv(
     'INITIAL_MESSAGE',
-    "Hello this is Carly from Car Trackers, I'm reaching out for your vehicle that you have posted on Craigslist for sale. Could you please share the VIN number of your vehicle?"
+    "Hi, I'm interested in your car for sale at your asking price. Do you mind sending me the vin so I can run a carfax on it?"
 )
 
 # Store conversation history per phone number (in-memory storage)
