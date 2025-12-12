@@ -530,6 +530,7 @@ class CraigslistScraper:
         vehicle = {
             'title': self._safe_extract("//span[@id='titletextonly']"),
             'price': self._safe_extract("//span[@class='price']"),
+            'desired_price': self._safe_extract("//span[@class='price']"),
             'mileage': self._safe_extract("//div[@class='attr auto_miles']/span[@class='valu']"),
             'vin': self._safe_extract("//div[@class='attr auto_vin']/span[@class='valu']"),
             'vehicle_details': self._safe_extract("//section[@id='postingbody']")
@@ -1006,6 +1007,13 @@ class SalesforceIntegration:
         # Parse name from title (fallback to generic if not found)
         first_name, last_name = self._parse_name(vehicle['title'])
         
+        # Clean desired_price: remove currency symbols and non-numeric characters, keep as string
+        desired_price_raw = vehicle.get('desired_price', '')
+        if desired_price_raw and desired_price_raw != "Not Found":
+            desired_price_cleaned = re.sub(r'[^0-9]', '', str(desired_price_raw))
+        else:
+            desired_price_cleaned = ''
+        
         payload = {
             "contact": {
                 "first_name": first_name,
@@ -1016,7 +1024,9 @@ class SalesforceIntegration:
             "vehicle": {
                 "vin": vehicle.get('vin', ''),
                 "mileage": vehicle.get('mileage', '').replace(',', ''),
-                "car_location": vehicle.get('location', '')  # Location extracted from gallery card
+                "car_location": vehicle.get('location', ''),  # Location extracted from gallery card
+                "private_party_url": vehicle.get('listing_url', ''),
+                "desired_price": desired_price_cleaned
             },
              "lead":{
                 "source": "CLB"
@@ -1315,7 +1325,7 @@ class DataExporter:
                 df = df.drop(columns=[col])
         
         # Reorder columns for better readability
-        priority_columns = ['title', 'price', 'original_price_clean', 'mmr_price', 'mmr_price_final', 'mmr_price_adjusted',
+        priority_columns = ['title', 'price', 'desired_price', 'original_price_clean', 'mmr_price', 'mmr_price_final', 'mmr_price_adjusted',
                           'vin', 'mileage', 'location', 'phone_numbers', 'is_qualified_lead', 
                           'listing_url']
         
