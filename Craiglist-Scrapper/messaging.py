@@ -36,6 +36,15 @@ try:
 except ImportError:  # pragma: no cover
     pytesseract = None
 
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    cv2 = None
+    np = None
+    CV2_AVAILABLE = False
+
 # Optional: explicit path to tesseract executable (Windows often needs this),
 # especially when running as a service where PATH may differ from your terminal.
 # Example: TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
@@ -157,19 +166,169 @@ VIN_PATTERN_STRICT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 VIN_PATTERN_LENIENT = re.compile(r"([A-HJ-NPR-Z0-9][\s\-_]?){16}[A-HJ-NPR-Z0-9]")
 
 
+def _preprocess_for_vin_opencv(image_bytes: bytes) -> list[tuple[str, bytes]]:
+    """
+    Enhanced preprocessing specifically optimized for VIN extraction using OpenCV.
+    
+    This function implements the same advanced preprocessing techniques from the OCR test script:
+    - CLAHE (Contrast Limited Adaptive Histogram Equalization) for varying lighting
+    - Denoising to remove image noise
+    - Sharpening kernel to enhance text edges
+    - Adaptive thresholding for better text extraction
+    - Otsu's thresholding as alternative
+    
+    Args:
+        image_bytes: Raw bytes of the image file
+        
+    Returns:
+        List of tuples (variant_name, processed_image_bytes) for multiple preprocessing attempts
+    """
+    if not CV2_AVAILABLE or Image is None:
+        return []
+    
+    variants = []
+    
+    try:
+        # Convert PIL Image to numpy array for OpenCV processing
+        pil_image = Image.open(io.BytesIO(image_bytes))
+        pil_image = ImageOps.exif_transpose(pil_image)
+        
+        # Convert PIL to OpenCV format (BGR)
+        if pil_image.mode == 'RGBA':
+            # Remove alpha channel for OpenCV
+            rgb_image = Image.new('RGB', pil_image.size, (255, 255, 255))
+            rgb_image.paste(pil_image, mask=pil_image.split()[3])
+            pil_image = rgb_image
+        
+        # Convert to numpy array
+        img_array = np.array(pil_image)
+        
+        # Convert RGB to BGR for OpenCV
+        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_array
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if len(img_bgr.shape) == 3 else img_bgr
+        
+        # Variant 1: CLAHE + Denoising + Sharpening + Adaptive Threshold
+        # This is the primary method from the test script
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+        
+        # Apply sharpening kernel
+        sharpen_kernel = np.array([[-1, -1, -1],
+                                   [-1,  9, -1],
+                                   [-1, -1, -1]])
+        sharpened = cv2.filter2D(denoised, -1, sharpen_kernel)
+        
+        # Adaptive thresholding (better for varying lighting)
+        adaptive_thresh = cv2.adaptiveThreshold(
+            sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # Convert back to PIL Image
+        pil_adaptive = Image.fromarray(adaptive_thresh)
+        img_bytes_adaptive = io.BytesIO()
+        pil_adaptive.save(img_bytes_adaptive, format='PNG')
+        variants.append(("opencv_adaptive", img_bytes_adaptive.getvalue()))
+        
+        # Variant 2: CLAHE + Denoising + Sharpening + Otsu's Threshold
+        _, otsu_thresh = cv2.threshold(
+            sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        
+        pil_otsu = Image.fromarray(otsu_thresh)
+        img_bytes_otsu = io.BytesIO()
+        pil_otsu.save(img_bytes_otsu, format='PNG')
+        variants.append(("opencv_otsu", img_bytes_otsu.getvalue()))
+        
+        # Variant 3: Just CLAHE + Denoising (no thresholding)
+        pil_denoised = Image.fromarray(denoised)
+        img_bytes_denoised = io.BytesIO()
+        pil_denoised.save(img_bytes_denoised, format='PNG')
+        variants.append(("opencv_denoised", img_bytes_denoised.getvalue()))
+        
+    except Exception as e:
+        logger.debug(f"OpenCV preprocessing failed: {e}")
+    
+    return variants
+
+
+def _correct_vin_ocr_errors(vin_candidate: str) -> str:
+    """
+    Correct common OCR errors in VIN candidates.
+    
+    Common OCR mistakes:
+    - I (letter) confused with 1 (digit)
+    - O (letter) confused with 0 (digit)
+    - Q (letter) confused with 0 or O
+    
+    Uses heuristics: if surrounded by digits, likely a digit; if surrounded by letters, likely a letter.
+    
+    Args:
+        vin_candidate: 17-character string that might contain OCR errors
+        
+    Returns:
+        Corrected VIN string
+    """
+    if len(vin_candidate) != 17:
+        return vin_candidate
+    
+    corrected = list(vin_candidate.upper())
+    
+    for i, char in enumerate(corrected):
+        # Check if character is potentially misread
+        if char in ['I', 'O', 'Q']:
+            # Check surrounding characters for context
+            prev_char = corrected[i-1] if i > 0 else None
+            next_char = corrected[i+1] if i < len(corrected)-1 else None
+            
+            # If surrounded by digits, likely a digit
+            if (prev_char and prev_char.isdigit() and next_char and next_char.isdigit()):
+                if char == 'I':
+                    corrected[i] = '1'
+                elif char == 'O' or char == 'Q':
+                    corrected[i] = '0'
+            # If surrounded by letters, keep as letter (but Q should be corrected to O in VIN context)
+            elif (prev_char and prev_char.isalpha() and next_char and next_char.isalpha()):
+                if char == 'Q':
+                    # Q is not valid in VINs, likely should be O
+                    corrected[i] = 'O'
+            # If one side is digit and other is letter, use position-based heuristic
+            # VIN positions 1-3 are typically letters (WMI), positions 4-8 can be mixed
+            elif i < 3 and char in ['I', 'O']:
+                # First 3 positions are usually letters, but I/O confusion with 1/0
+                # Keep as letter for now
+                pass
+            elif i >= 9 and char in ['I', 'O']:
+                # Later positions more likely to be digits
+                if char == 'I':
+                    corrected[i] = '1'
+                elif char == 'O':
+                    corrected[i] = '0'
+    
+    return ''.join(corrected)
+
+
 def _find_vin_in_text(text: str) -> Optional[str]:
     """
-    Try to locate a valid-looking VIN within text.
+    Try to locate a valid-looking VIN within text with enhanced error correction.
 
-    This function uses multiple strategies to find VINs:
+    This function uses multiple strategies to find VINs, similar to the OCR test script:
     1. Normalize text (remove spaces, dashes, etc.) and match strict pattern
     2. Try lenient pattern that handles OCR spacing artifacts
-    3. Extract and validate any 17-character alphanumeric sequence
+    3. Extract 17-character sequences and attempt character correction
+    4. Validate corrected candidates
 
     Notes:
         - VINs are 17 characters and exclude I, O, Q (to avoid confusion with 1/0).
-        - We treat the OCR output as untrusted and only accept strict matches.
-        - OCR may introduce spaces, dashes, or other characters between VIN digits.
+        - OCR may misread I as 1, O as 0, Q as O or 0.
+        - This function attempts to correct common OCR errors.
 
     Args:
         text: Arbitrary text (OCR output or user message).
@@ -200,13 +359,39 @@ def _find_vin_in_text(text: str) -> Optional[str]:
             logger.debug(f"VIN found using lenient pattern: {normalized_vin}")
             return normalized_vin
 
-    # Strategy 3: Look for any sequence of 17 valid VIN characters in normalized text
-    # This handles cases where OCR completely removes word boundaries
+    # Strategy 3: Look for any sequence of 17 alphanumeric characters (including I, O, Q)
+    # Then attempt to correct OCR errors
+    lenient_pattern = re.compile(r'\b[A-Z0-9]{17}\b')
+    matches = lenient_pattern.findall(normalized)
+    
+    for candidate in matches:
+        # Attempt to correct common OCR errors
+        corrected = _correct_vin_ocr_errors(candidate)
+        
+        # Validate corrected candidate
+        if VIN_PATTERN_STRICT.match(corrected):
+            logger.debug(f"VIN found after correction: {candidate} -> {corrected}")
+            return corrected
+        
+        # Also check if original candidate is valid (in case correction wasn't needed)
+        if VIN_PATTERN_STRICT.match(candidate):
+            logger.debug(f"VIN found (no correction needed): {candidate}")
+            return candidate
+
+    # Strategy 4: Sliding window approach for cases without word boundaries
     for i in range(len(normalized) - 16):
         candidate = normalized[i:i+17]
-        if VIN_PATTERN_STRICT.match(candidate):
-            logger.debug(f"VIN found using sliding window: {candidate}")
-            return candidate
+        # Check if it's all alphanumeric
+        if re.match(r'^[A-Z0-9]{17}$', candidate):
+            # Attempt correction
+            corrected = _correct_vin_ocr_errors(candidate)
+            if VIN_PATTERN_STRICT.match(corrected):
+                logger.debug(f"VIN found via sliding window with correction: {candidate} -> {corrected}")
+                return corrected
+            # Check original
+            if VIN_PATTERN_STRICT.match(candidate):
+                logger.debug(f"VIN found via sliding window: {candidate}")
+                return candidate
 
     return None
 
@@ -215,11 +400,12 @@ def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
     """
     Extract text from an image using OCR (if available).
 
-    This function uses multiple OCR strategies to maximize VIN recognition accuracy:
-    1. Optimized Tesseract configuration for alphanumeric text (VIN format)
-    2. Multiple preprocessing approaches (contrast, sharpness, scaling)
+    This function implements the same advanced OCR techniques from the OCR test script:
+    1. OpenCV-based preprocessing (CLAHE, denoising, sharpening, adaptive thresholding)
+    2. Optimized Tesseract configuration matching test script: --oem 3 --psm 6
     3. Character whitelist to reduce OCR errors
-    4. Page segmentation modes optimized for single text blocks
+    4. Multiple preprocessing variants for maximum accuracy
+    5. Falls back to PIL preprocessing if OpenCV is unavailable
 
     This is best-effort and intentionally defensive: OCR dependencies may be missing
     in some environments, and we don't want inbound message processing to crash.
@@ -236,75 +422,89 @@ def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
     if Image is None or pytesseract is None:
         return None
 
-    # Tesseract configuration optimized for VIN recognition
-    # VINs are 17 characters: A-Z (excluding I, O, Q) and 0-9
-    # PSM 6 = Assume uniform block of text
-    # PSM 7 = Treat image as single text line
-    # PSM 8 = Treat image as single word
-    # We'll try multiple PSM modes for better accuracy
+    # Tesseract configuration optimized for VIN recognition (matching test script)
+    # --oem 3 = Use default OCR engine mode
+    # --psm 6 = Assume uniform block of text
+    # Whitelist: A-Z (excluding I, O, Q) and 0-9
     tesseract_configs = [
-        # Config 1: Single uniform block, whitelist alphanumeric (no I, O, Q)
-        '--psm 6 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
-        # Config 2: Single text line, whitelist
-        '--psm 7 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
-        # Config 3: Single word, whitelist
-        '--psm 8 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
-        # Config 4: Auto page segmentation with whitelist
-        '--psm 3 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
-        # Config 5: Default (fallback if whitelist causes issues)
-        '--psm 6',
+        # Primary config from test script (best for VINs)
+        '--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Alternative PSM modes
+        '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Fallback without whitelist (in case whitelist causes issues)
+        '--oem 3 --psm 6',
     ]
 
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        image = ImageOps.exif_transpose(image)
-
-        # Store original size for reference
-        original_size = image.size
-
-        # Try multiple preprocessing strategies
-        preprocessing_variants = []
-
-        # Variant 1: High contrast grayscale with sharpening
-        img1 = image.convert("L")
-        img1 = ImageEnhance.Contrast(img1).enhance(2.5)
-        img1 = ImageEnhance.Sharpness(img1).enhance(2.5)
-        preprocessing_variants.append(("high_contrast_sharp", img1))
-
-        # Variant 2: Moderate contrast with brightness adjustment
-        img2 = image.convert("L")
-        img2 = ImageEnhance.Brightness(img2).enhance(1.2)
-        img2 = ImageEnhance.Contrast(img2).enhance(2.0)
-        preprocessing_variants.append(("moderate_contrast_bright", img2))
-
-        # Variant 3: Scaled up version (helps with small text)
-        if original_size[0] < 1000 or original_size[1] < 1000:
-            scale_factor = max(2.0, 1500 / max(original_size))
-            new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
-            img3 = image.convert("L").resize(new_size, Image.Resampling.LANCZOS)
-            img3 = ImageEnhance.Contrast(img3).enhance(2.0)
-            img3 = ImageEnhance.Sharpness(img3).enhance(2.0)
-            preprocessing_variants.append(("scaled_high_contrast", img3))
-
-        # Variant 4: Denoised version
-        if ImageFilter is not None:
-            img4 = image.convert("L")
-            img4 = img4.filter(ImageFilter.MedianFilter(size=3))
-            img4 = ImageEnhance.Contrast(img4).enhance(2.5)
-            preprocessing_variants.append(("denoised_contrast", img4))
-
-        # Try all combinations of preprocessing and Tesseract configs
         all_results = []
-        for variant_name, processed_image in preprocessing_variants:
-            for config in tesseract_configs:
+        
+        # Strategy 1: Try OpenCV preprocessing first (same as test script)
+        if CV2_AVAILABLE:
+            opencv_variants = _preprocess_for_vin_opencv(image_bytes)
+            for variant_name, processed_bytes in opencv_variants:
                 try:
-                    text = pytesseract.image_to_string(processed_image, config=config).strip()
-                    if text:
-                        all_results.append((variant_name, config, text))
-                        logger.debug(f"OCR attempt - Variant: {variant_name}, Config: {config[:30]}..., Text: {text[:100]}")
+                    processed_image = Image.open(io.BytesIO(processed_bytes))
+                    for config in tesseract_configs:
+                        try:
+                            text = pytesseract.image_to_string(processed_image, config=config).strip()
+                            if text:
+                                all_results.append((f"opencv_{variant_name}", config, text))
+                                logger.debug(f"OCR (OpenCV {variant_name}): {text[:100]}")
+                        except Exception as e:
+                            logger.debug(f"OCR attempt failed - OpenCV {variant_name}, Error: {e}")
+                            continue
                 except Exception as e:
-                    logger.debug(f"OCR attempt failed - Variant: {variant_name}, Config: {config[:30]}..., Error: {e}")
+                    logger.debug(f"OpenCV variant processing failed: {e}")
                     continue
+        
+        # Strategy 2: Fallback to PIL preprocessing (if OpenCV failed or unavailable)
+        if not all_results or not CV2_AVAILABLE:
+            image = Image.open(io.BytesIO(image_bytes))
+            image = ImageOps.exif_transpose(image)
+            
+            original_size = image.size
+            preprocessing_variants = []
+
+            # Variant 1: High contrast grayscale with sharpening
+            img1 = image.convert("L")
+            img1 = ImageEnhance.Contrast(img1).enhance(2.5)
+            img1 = ImageEnhance.Sharpness(img1).enhance(2.5)
+            preprocessing_variants.append(("pil_high_contrast_sharp", img1))
+
+            # Variant 2: Moderate contrast with brightness adjustment
+            img2 = image.convert("L")
+            img2 = ImageEnhance.Brightness(img2).enhance(1.2)
+            img2 = ImageEnhance.Contrast(img2).enhance(2.0)
+            preprocessing_variants.append(("pil_moderate_contrast_bright", img2))
+
+            # Variant 3: Scaled up version (helps with small text)
+            if original_size[0] < 1000 or original_size[1] < 1000:
+                scale_factor = max(2.0, 1500 / max(original_size))
+                new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
+                img3 = image.convert("L").resize(new_size, Image.Resampling.LANCZOS)
+                img3 = ImageEnhance.Contrast(img3).enhance(2.0)
+                img3 = ImageEnhance.Sharpness(img3).enhance(2.0)
+                preprocessing_variants.append(("pil_scaled_high_contrast", img3))
+
+            # Variant 4: Denoised version
+            if ImageFilter is not None:
+                img4 = image.convert("L")
+                img4 = img4.filter(ImageFilter.MedianFilter(size=3))
+                img4 = ImageEnhance.Contrast(img4).enhance(2.5)
+                preprocessing_variants.append(("pil_denoised_contrast", img4))
+
+            # Try all PIL preprocessing variants with Tesseract configs
+            for variant_name, processed_image in preprocessing_variants:
+                for config in tesseract_configs:
+                    try:
+                        text = pytesseract.image_to_string(processed_image, config=config).strip()
+                        if text:
+                            all_results.append((variant_name, config, text))
+                            logger.debug(f"OCR (PIL {variant_name}): {text[:100]}")
+                    except Exception as e:
+                        logger.debug(f"OCR attempt failed - PIL {variant_name}, Error: {e}")
+                        continue
 
         # Log all OCR results for debugging
         if all_results:
