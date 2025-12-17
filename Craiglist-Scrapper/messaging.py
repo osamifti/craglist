@@ -24,11 +24,12 @@ except ImportError:  # pragma: no cover
     requests = None
 
 try:
-    from PIL import Image, ImageOps, ImageEnhance
+    from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 except ImportError:  # pragma: no cover
     Image = None
     ImageOps = None
     ImageEnhance = None
+    ImageFilter = None
 
 try:
     import pytesseract
@@ -148,16 +149,27 @@ def _update_pipeline_status(**kwargs):
         pipeline_status.update(kwargs)
 
 
-VIN_PATTERN = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+# Primary VIN pattern: strict 17-character match with word boundaries
+VIN_PATTERN_STRICT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+# Secondary VIN pattern: more lenient, handles OCR artifacts better
+# This pattern looks for 17 alphanumeric chars (excluding I, O, Q) that may have
+# spaces/dashes/underscores between them, which OCR sometimes introduces
+VIN_PATTERN_LENIENT = re.compile(r"([A-HJ-NPR-Z0-9][\s\-_]?){16}[A-HJ-NPR-Z0-9]")
 
 
 def _find_vin_in_text(text: str) -> Optional[str]:
     """
     Try to locate a valid-looking VIN within text.
 
+    This function uses multiple strategies to find VINs:
+    1. Normalize text (remove spaces, dashes, etc.) and match strict pattern
+    2. Try lenient pattern that handles OCR spacing artifacts
+    3. Extract and validate any 17-character alphanumeric sequence
+
     Notes:
         - VINs are 17 characters and exclude I, O, Q (to avoid confusion with 1/0).
         - We treat the OCR output as untrusted and only accept strict matches.
+        - OCR may introduce spaces, dashes, or other characters between VIN digits.
 
     Args:
         text: Arbitrary text (OCR output or user message).
@@ -168,17 +180,46 @@ def _find_vin_in_text(text: str) -> Optional[str]:
     if not text:
         return None
 
+    # Strategy 1: Normalize and use strict pattern (original approach)
     normalized = re.sub(r"[\s\-_:]", "", text.upper())
-    match = VIN_PATTERN.search(normalized)
-    if not match:
-        return None
+    match = VIN_PATTERN_STRICT.search(normalized)
+    if match:
+        vin = match.group(1)
+        logger.debug(f"VIN found using strict pattern: {vin}")
+        return vin
 
-    return match.group(1)
+    # Strategy 2: Try lenient pattern on original text (handles OCR spacing)
+    # This looks for patterns like "1HG CM82633A123456" or "1HG-CM82633A123456"
+    match_lenient = VIN_PATTERN_LENIENT.search(text.upper())
+    if match_lenient:
+        # Extract the matched portion and normalize it
+        matched_text = match_lenient.group(0)
+        normalized_vin = re.sub(r"[\s\-_:]", "", matched_text)
+        # Validate it's exactly 17 characters and matches VIN pattern
+        if len(normalized_vin) == 17 and VIN_PATTERN_STRICT.match(normalized_vin):
+            logger.debug(f"VIN found using lenient pattern: {normalized_vin}")
+            return normalized_vin
+
+    # Strategy 3: Look for any sequence of 17 valid VIN characters in normalized text
+    # This handles cases where OCR completely removes word boundaries
+    for i in range(len(normalized) - 16):
+        candidate = normalized[i:i+17]
+        if VIN_PATTERN_STRICT.match(candidate):
+            logger.debug(f"VIN found using sliding window: {candidate}")
+            return candidate
+
+    return None
 
 
 def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
     """
     Extract text from an image using OCR (if available).
+
+    This function uses multiple OCR strategies to maximize VIN recognition accuracy:
+    1. Optimized Tesseract configuration for alphanumeric text (VIN format)
+    2. Multiple preprocessing approaches (contrast, sharpness, scaling)
+    3. Character whitelist to reduce OCR errors
+    4. Page segmentation modes optimized for single text blocks
 
     This is best-effort and intentionally defensive: OCR dependencies may be missing
     in some environments, and we don't want inbound message processing to crash.
@@ -195,18 +236,95 @@ def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
     if Image is None or pytesseract is None:
         return None
 
+    # Tesseract configuration optimized for VIN recognition
+    # VINs are 17 characters: A-Z (excluding I, O, Q) and 0-9
+    # PSM 6 = Assume uniform block of text
+    # PSM 7 = Treat image as single text line
+    # PSM 8 = Treat image as single word
+    # We'll try multiple PSM modes for better accuracy
+    tesseract_configs = [
+        # Config 1: Single uniform block, whitelist alphanumeric (no I, O, Q)
+        '--psm 6 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Config 2: Single text line, whitelist
+        '--psm 7 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Config 3: Single word, whitelist
+        '--psm 8 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Config 4: Auto page segmentation with whitelist
+        '--psm 3 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789',
+        # Config 5: Default (fallback if whitelist causes issues)
+        '--psm 6',
+    ]
+
     try:
         image = Image.open(io.BytesIO(image_bytes))
         image = ImageOps.exif_transpose(image)
 
-        # Basic preprocessing to improve OCR on phone photos.
-        image = image.convert("L")
-        image = ImageEnhance.Contrast(image).enhance(2.0)
-        image = ImageEnhance.Sharpness(image).enhance(2.0)
+        # Store original size for reference
+        original_size = image.size
 
-        return pytesseract.image_to_string(image)
+        # Try multiple preprocessing strategies
+        preprocessing_variants = []
+
+        # Variant 1: High contrast grayscale with sharpening
+        img1 = image.convert("L")
+        img1 = ImageEnhance.Contrast(img1).enhance(2.5)
+        img1 = ImageEnhance.Sharpness(img1).enhance(2.5)
+        preprocessing_variants.append(("high_contrast_sharp", img1))
+
+        # Variant 2: Moderate contrast with brightness adjustment
+        img2 = image.convert("L")
+        img2 = ImageEnhance.Brightness(img2).enhance(1.2)
+        img2 = ImageEnhance.Contrast(img2).enhance(2.0)
+        preprocessing_variants.append(("moderate_contrast_bright", img2))
+
+        # Variant 3: Scaled up version (helps with small text)
+        if original_size[0] < 1000 or original_size[1] < 1000:
+            scale_factor = max(2.0, 1500 / max(original_size))
+            new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
+            img3 = image.convert("L").resize(new_size, Image.Resampling.LANCZOS)
+            img3 = ImageEnhance.Contrast(img3).enhance(2.0)
+            img3 = ImageEnhance.Sharpness(img3).enhance(2.0)
+            preprocessing_variants.append(("scaled_high_contrast", img3))
+
+        # Variant 4: Denoised version
+        if ImageFilter is not None:
+            img4 = image.convert("L")
+            img4 = img4.filter(ImageFilter.MedianFilter(size=3))
+            img4 = ImageEnhance.Contrast(img4).enhance(2.5)
+            preprocessing_variants.append(("denoised_contrast", img4))
+
+        # Try all combinations of preprocessing and Tesseract configs
+        all_results = []
+        for variant_name, processed_image in preprocessing_variants:
+            for config in tesseract_configs:
+                try:
+                    text = pytesseract.image_to_string(processed_image, config=config).strip()
+                    if text:
+                        all_results.append((variant_name, config, text))
+                        logger.debug(f"OCR attempt - Variant: {variant_name}, Config: {config[:30]}..., Text: {text[:100]}")
+                except Exception as e:
+                    logger.debug(f"OCR attempt failed - Variant: {variant_name}, Config: {config[:30]}..., Error: {e}")
+                    continue
+
+        # Log all OCR results for debugging
+        if all_results:
+            logger.info(f"OCR extracted {len(all_results)} text variants from image")
+            # Log first few results for debugging
+            for i, (variant, config, text) in enumerate(all_results[:3]):
+                logger.info(f"OCR result {i+1} ({variant}): {text[:200]}")
+
+        # Combine all results with newlines (Tesseract might split VIN across lines)
+        combined_text = "\n".join([text for _, _, text in all_results])
+        
+        # Log the combined text for debugging
+        if combined_text:
+            logger.info(f"Combined OCR text (first 500 chars): {combined_text[:500]}")
+
+        return combined_text if combined_text else None
+
     except Exception as e:
         # Most common cause on Windows: tesseract.exe not on PATH for this process.
+        # On Railway/Linux: tesseract should be in PATH after Dockerfile installation
         logger.warning(f"OCR failed: {e}")
         return None
 
@@ -247,10 +365,21 @@ def _extract_vin_from_twilio_media_urls(image_urls: list[str]) -> Optional[str]:
             response.raise_for_status()
 
             ocr_text = _ocr_text_from_image_bytes(response.content) or ""
+            
+            # Log raw OCR output for debugging (truncated to avoid log spam)
+            if ocr_text:
+                logger.info(f"Raw OCR text from image (first 300 chars): {ocr_text[:300]}")
+            else:
+                logger.warning("OCR returned empty text from image")
+            
             vin = _find_vin_in_text(ocr_text)
             if vin:
                 logger.info(f"VIN extracted from image via OCR: {vin}")
                 return vin
+            else:
+                # Log when OCR text exists but no VIN found - helps debug regex matching
+                if ocr_text:
+                    logger.warning(f"OCR extracted text but no valid 17-character VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
         except Exception as e:
             logger.warning(f"Failed to OCR media URL '{image_url}': {e}")
             continue
