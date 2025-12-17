@@ -9,6 +9,11 @@ from datetime import datetime
 from decimal import Decimal
 import mysql.connector
 from mysql.connector import Error, pooling
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# This must be called before reading any environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 

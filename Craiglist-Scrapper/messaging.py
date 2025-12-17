@@ -3,6 +3,8 @@ from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import time
 import os
+import io
+import re
 from dotenv import load_dotenv
 from flask import Flask, request
 from openai import OpenAI
@@ -15,6 +17,23 @@ from typing import Any, Dict, Optional
 
 from all_rounder_2 import run_pipeline_from_payload
 from database import init_database, save_message, get_conversations_by_thread, get_all_threads, get_messages_by_type
+
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None
+
+try:
+    from PIL import Image, ImageOps, ImageEnhance
+except ImportError:  # pragma: no cover
+    Image = None
+    ImageOps = None
+    ImageEnhance = None
+
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover
+    pytesseract = None
 
 
 # Try to import ASGI adapter for uvicorn compatibility
@@ -120,6 +139,114 @@ def _update_pipeline_status(**kwargs):
     """Thread-safe helper to update global pipeline status dictionary."""
     with pipeline_lock:
         pipeline_status.update(kwargs)
+
+
+VIN_PATTERN = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+
+
+def _find_vin_in_text(text: str) -> Optional[str]:
+    """
+    Try to locate a valid-looking VIN within text.
+
+    Notes:
+        - VINs are 17 characters and exclude I, O, Q (to avoid confusion with 1/0).
+        - We treat the OCR output as untrusted and only accept strict matches.
+
+    Args:
+        text: Arbitrary text (OCR output or user message).
+
+    Returns:
+        A 17-character VIN string if found; otherwise None.
+    """
+    if not text:
+        return None
+
+    normalized = re.sub(r"[\s\-_:]", "", text.upper())
+    match = VIN_PATTERN.search(normalized)
+    if not match:
+        return None
+
+    return match.group(1)
+
+
+def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
+    """
+    Extract text from an image using OCR (if available).
+
+    This is best-effort and intentionally defensive: OCR dependencies may be missing
+    in some environments, and we don't want inbound message processing to crash.
+
+    Args:
+        image_bytes: Raw bytes for an image file.
+
+    Returns:
+        OCR'd text if available; otherwise None.
+    """
+    if not image_bytes:
+        return None
+
+    if Image is None or pytesseract is None:
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(image)
+
+        # Basic preprocessing to improve OCR on phone photos.
+        image = image.convert("L")
+        image = ImageEnhance.Contrast(image).enhance(2.0)
+        image = ImageEnhance.Sharpness(image).enhance(2.0)
+
+        return pytesseract.image_to_string(image)
+    except Exception:
+        return None
+
+
+def _extract_vin_from_twilio_media_urls(image_urls: list[str]) -> Optional[str]:
+    """
+    Download Twilio MMS media and attempt to OCR a VIN from it.
+
+    Why this exists:
+        Twilio `MediaUrl*` links are typically protected by HTTP Basic Auth using
+        (Account SID, Auth Token). External services (like OpenAI) can't fetch them
+        unless you proxy/authenticate, so we perform OCR locally.
+
+    Args:
+        image_urls: List of Twilio media URLs from inbound webhook payload.
+
+    Returns:
+        VIN if a valid one is found in any image; otherwise None.
+    """
+    if not image_urls:
+        return None
+
+    if requests is None:
+        logger.warning("OCR skipped: 'requests' is not installed.")
+        return None
+
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        logger.warning("OCR skipped: Twilio credentials are missing.")
+        return None
+
+    for image_url in image_urls:
+        try:
+            response = requests.get(
+                image_url,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                timeout=20,
+            )
+            response.raise_for_status()
+
+            ocr_text = _ocr_text_from_image_bytes(response.content) or ""
+            vin = _find_vin_in_text(ocr_text)
+            if vin:
+                logger.info(f"VIN extracted from image via OCR: {vin}")
+                return vin
+        except Exception as e:
+            logger.warning(f"Failed to OCR media URL '{image_url}': {e}")
+            continue
+
+    return None
 
 
 def _is_stop_requested() -> bool:
@@ -277,14 +404,16 @@ def wait_for_assistant_response(thread_id: str, run_id: str, timeout_seconds: in
         logger.error(f"Assistant run ended with unexpected status: {status}")
         return None
 
-def generate_ai_response(user_message, phone_number):
+def generate_ai_response(user_message, phone_number, image_urls=None):
     """
     Generate an AI-powered response using OpenAI API based on conversation history.
     Uses the system prompt from environment variables or default prompt.
+    Supports both text and image messages.
     
     Args:
-        user_message: The incoming message from the user
+        user_message: The incoming message from the user (text content, may be empty for image-only)
         phone_number: The user's phone number (for conversation context)
+        image_urls: Optional list of image URLs from Twilio MediaUrl parameters
     
     Returns:
         str: AI-generated response message
@@ -298,14 +427,47 @@ def generate_ai_response(user_message, phone_number):
         # Ensure we have a thread for this phone number
         thread_id = ensure_assistant_thread(phone_number)
 
-        # Append to local history for reference / fallback
-        conversation_history[phone_number].append({"role": "user", "content": user_message})
+        # Build message content array for OpenAI Assistants API
+        # Supports both text and images
+        message_content = []
+        
+        # Add text content if present
+        if user_message and user_message.strip():
+            message_content.append({
+                "type": "text",
+                "text": user_message
+            })
+        
+        # Add image content if present
+        if image_urls:
+            for image_url in image_urls:
+                message_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                })
+            logger.info(f"Processing {len(image_urls)} image(s) for {phone_number}")
+        
+        # If no content at all, use a default message
+        if not message_content:
+            message_content.append({
+                "type": "text",
+                "text": "I received your message."
+            })
 
-        # Send message to Assistant thread
+        # Append to local history for reference / fallback
+        # Store text and image info in history
+        history_content = user_message if user_message else ""
+        if image_urls:
+            history_content += f" [Sent {len(image_urls)} image(s)]"
+        conversation_history[phone_number].append({"role": "user", "content": history_content})
+
+        # Send message to Assistant thread with content array
         openai_client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=user_message,
+            content=message_content,
             extra_headers=OPENAI_ASSISTANTS_HEADER,
         )
 
@@ -337,7 +499,7 @@ def generate_ai_response(user_message, phone_number):
 def process_incoming_message():
     """
     Process incoming message from webhook (supports both GET and POST).
-    Extracts phone number, message, and thread ID, then generates AI response.
+    Extracts phone number, message, thread ID, and media (images/photos), then generates AI response.
     
     Returns:
         tuple: (response_xml, status_code, headers) or error response
@@ -349,15 +511,47 @@ def process_incoming_message():
         incoming_message = request.values.get('Body', request.args.get('Body', '')).strip()
         sender_phone = request.values.get('From', request.args.get('From', '')).strip()
         
+        # Check for media (images/photos) in the message
+        num_media = request.values.get('NumMedia', request.args.get('NumMedia', '0'))
+        image_urls = []
+        extracted_vin_from_image: Optional[str] = None
+        
+        try:
+            num_media_int = int(num_media)
+            if num_media_int > 0:
+                # Extract all media URLs
+                for i in range(num_media_int):
+                    media_url = request.values.get(f'MediaUrl{i}', request.args.get(f'MediaUrl{i}', ''))
+                    if media_url:
+                        image_urls.append(media_url)
+                        logger.info(f"Found media URL {i+1}/{num_media_int}: {media_url}")
+        except (ValueError, TypeError):
+            # If NumMedia is not a valid number, treat as 0
+            num_media_int = 0
+        
         # Get thread ID if provided (optional, defaults to phone number)
         thread_id_param = request.values.get('ThreadId', request.args.get('ThreadId', '')).strip()
         
-        # Validate incoming data
-        if not incoming_message:
-            logger.warning(f"Received empty message from {sender_phone}")
+        # Validate incoming data - now allow empty message if images are present
+        if not incoming_message and not image_urls:
+            logger.warning(f"Received empty message (no text or images) from {sender_phone}")
             response = MessagingResponse()
             response.message("I didn't receive your message. Could you please try again?")
             return str(response), 200, {'Content-Type': 'text/xml'}
+
+        # If the user sent only an image (common for VIN stickers), try OCR locally.
+        # If OCR can't find a VIN, ask again instead of sending a confusing AI response.
+        if image_urls and not incoming_message:
+            vin_from_ocr = _extract_vin_from_twilio_media_urls(image_urls)
+            if vin_from_ocr:
+                extracted_vin_from_image = vin_from_ocr
+                incoming_message = f"VIN: {vin_from_ocr}"
+            else:
+                response = MessagingResponse()
+                response.message(
+                    "I couldn’t read the VIN from that photo. Can you please type the 17‑digit VIN, or send a clearer close-up of the VIN plate/sticker?"
+                )
+                return str(response), 200, {'Content-Type': 'text/xml'}
         
         if not sender_phone:
             logger.warning("Received message without sender phone number")
@@ -380,21 +574,38 @@ def process_incoming_message():
             if normalized_sender_phone not in thread_id_mapping:
                 thread_id_mapping[normalized_sender_phone] = thread_id
         
-        logger.info(f"Received message - Thread ID: {thread_id}, From: {sender_phone} ({normalized_sender_phone}), Message: {incoming_message}")
+        # Build content description for logging and database
+        content_description = incoming_message if incoming_message else ""
+        if image_urls:
+            if content_description:
+                content_description += f" [Attached {len(image_urls)} image(s)]"
+            else:
+                content_description = f"[Sent {len(image_urls)} image(s)]"
         
-        # Save inbound message to database
+        logger.info(f"Received message - Thread ID: {thread_id}, From: {sender_phone} ({normalized_sender_phone}), Content: {content_description}")
+        
+        # Save inbound message to database (include image URLs in content if present)
         save_message(
             thread_id=thread_id,
             phone_number=normalized_sender_phone,
             message_type='inbound',
             role='user',
-            content=incoming_message
+            content=content_description
         )
         
         # Generate AI response using OpenAI API and system prompt from .env
+        # Pass image URLs if present so the AI can see the images
         # Use normalized phone number for consistent conversation history lookup
         # Thread ID is used for logging and tracking, but phone number is used for conversation history
-        ai_response = generate_ai_response(incoming_message, normalized_sender_phone)
+        # Pass None for image_urls if list is empty to avoid unnecessary processing
+        if extracted_vin_from_image:
+            ai_response = f'I have your VIN number as "{extracted_vin_from_image}".'
+        else:
+            ai_response = generate_ai_response(
+                incoming_message if incoming_message else "",
+                normalized_sender_phone,
+                image_urls=image_urls if image_urls else None
+            )
         
         # Save outbound message to database
         save_message(
