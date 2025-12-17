@@ -35,6 +35,13 @@ try:
 except ImportError:  # pragma: no cover
     pytesseract = None
 
+# Optional: explicit path to tesseract executable (Windows often needs this),
+# especially when running as a service where PATH may differ from your terminal.
+# Example: TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+TESSERACT_CMD = os.getenv("TESSERACT_CMD")
+if pytesseract is not None and TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
 
 # Try to import ASGI adapter for uvicorn compatibility
 try:
@@ -198,7 +205,9 @@ def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
         image = ImageEnhance.Sharpness(image).enhance(2.0)
 
         return pytesseract.image_to_string(image)
-    except Exception:
+    except Exception as e:
+        # Most common cause on Windows: tesseract.exe not on PATH for this process.
+        logger.warning(f"OCR failed: {e}")
         return None
 
 

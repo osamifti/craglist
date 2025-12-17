@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxdamage1 \
     libxkbcommon0 \
     libxrandr2 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     wget \
     ca-certificates \
     findutils \
