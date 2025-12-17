@@ -387,6 +387,62 @@ def _extract_vin_from_twilio_media_urls(image_urls: list[str]) -> Optional[str]:
     return None
 
 
+def _extract_vin_from_uploaded_files(uploaded_files: list) -> Optional[str]:
+    """
+    Extract VIN from directly uploaded image files (for testing with Postman, etc.).
+
+    This function handles multipart/form-data file uploads where images are sent
+    directly in the request body rather than as URLs.
+
+    Args:
+        uploaded_files: List of file objects from Flask request.files.
+
+    Returns:
+        VIN if a valid one is found in any image; otherwise None.
+    """
+    if not uploaded_files:
+        return None
+
+    for file_key, file_obj in uploaded_files.items():
+        if not file_obj or not file_obj.filename:
+            continue
+
+        try:
+            # Read file content into bytes
+            file_obj.seek(0)  # Reset file pointer
+            image_bytes = file_obj.read()
+            
+            if not image_bytes:
+                logger.warning(f"Uploaded file '{file_key}' is empty")
+                continue
+
+            logger.info(f"Processing uploaded file '{file_key}' ({len(image_bytes)} bytes)")
+
+            # Perform OCR on the image bytes
+            ocr_text = _ocr_text_from_image_bytes(image_bytes) or ""
+            
+            # Log raw OCR output for debugging
+            if ocr_text:
+                logger.info(f"Raw OCR text from uploaded file (first 300 chars): {ocr_text[:300]}")
+            else:
+                logger.warning("OCR returned empty text from uploaded file")
+            
+            # Try to find VIN in OCR text
+            vin = _find_vin_in_text(ocr_text)
+            if vin:
+                logger.info(f"VIN extracted from uploaded file via OCR: {vin}")
+                return vin
+            else:
+                # Log when OCR text exists but no VIN found
+                if ocr_text:
+                    logger.warning(f"OCR extracted text but no valid 17-character VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
+        except Exception as e:
+            logger.warning(f"Failed to OCR uploaded file '{file_key}': {e}")
+            continue
+
+    return None
+
+
 def _is_stop_requested() -> bool:
     """
     Check if a stop has been requested for the running pipeline.
@@ -650,10 +706,21 @@ def process_incoming_message():
         sender_phone = request.values.get('From', request.args.get('From', '')).strip()
         
         # Check for media (images/photos) in the message
+        # Support both Twilio MediaUrl format and direct file uploads (for Postman testing)
         num_media = request.values.get('NumMedia', request.args.get('NumMedia', '0'))
         image_urls = []
         extracted_vin_from_image: Optional[str] = None
         
+        # Check for direct file uploads (multipart/form-data) - useful for Postman testing
+        uploaded_files = {}
+        if request.files:
+            for file_key in request.files:
+                file_obj = request.files[file_key]
+                if file_obj and file_obj.filename:
+                    uploaded_files[file_key] = file_obj
+                    logger.info(f"Found uploaded file: {file_key} ({file_obj.filename})")
+        
+        # Check for Twilio MediaUrl format (for production Twilio webhooks)
         try:
             num_media_int = int(num_media)
             if num_media_int > 0:
@@ -719,9 +786,14 @@ def process_incoming_message():
         content_description = incoming_message if incoming_message else ""
         if image_urls:
             if content_description:
-                content_description += f" [Attached {len(image_urls)} image(s)]"
+                content_description += f" [Attached {len(image_urls)} image(s) via URL]"
             else:
-                content_description = f"[Sent {len(image_urls)} image(s)]"
+                content_description = f"[Sent {len(image_urls)} image(s) via URL]"
+        if uploaded_files:
+            if content_description:
+                content_description += f" [Uploaded {len(uploaded_files)} file(s)]"
+            else:
+                content_description = f"[Uploaded {len(uploaded_files)} file(s)]"
         
         logger.info(f"Received message - Thread ID: {thread_id}, From: {sender_phone} ({normalized_sender_phone}), Content: {content_description}")
         
