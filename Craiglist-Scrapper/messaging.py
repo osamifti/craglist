@@ -539,19 +539,22 @@ def process_incoming_message():
             response.message("I didn't receive your message. Could you please try again?")
             return str(response), 200, {'Content-Type': 'text/xml'}
 
-        # If the user sent only an image (common for VIN stickers), try OCR locally.
-        # If OCR can't find a VIN, ask again instead of sending a confusing AI response.
-        if image_urls and not incoming_message:
-            vin_from_ocr = _extract_vin_from_twilio_media_urls(image_urls)
-            if vin_from_ocr:
-                extracted_vin_from_image = vin_from_ocr
-                incoming_message = f"VIN: {vin_from_ocr}"
-            else:
-                response = MessagingResponse()
-                response.message(
-                    "I couldn’t read the VIN from that photo. Can you please type the 17‑digit VIN, or send a clearer close-up of the VIN plate/sticker?"
-                )
-                return str(response), 200, {'Content-Type': 'text/xml'}
+        # If the user sent an image (common for VIN stickers), try to extract a VIN.
+        # Important: users often include text like "VIN is in the photo" without typing the VIN.
+        # We should OCR whenever images exist AND no VIN is present in the text.
+        if image_urls:
+            vin_in_text = _find_vin_in_text(incoming_message)
+            if not vin_in_text:
+                vin_from_ocr = _extract_vin_from_twilio_media_urls(image_urls)
+                if vin_from_ocr:
+                    extracted_vin_from_image = vin_from_ocr
+                    incoming_message = f"VIN: {vin_from_ocr}"
+                else:
+                    response = MessagingResponse()
+                    response.message(
+                        "I couldn’t read the VIN from that photo. Can you please type the 17‑digit VIN, or send a clearer close-up of the VIN plate/sticker?"
+                    )
+                    return str(response), 200, {'Content-Type': 'text/xml'}
         
         if not sender_phone:
             logger.warning("Received message without sender phone number")
