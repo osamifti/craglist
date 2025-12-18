@@ -1060,8 +1060,51 @@ def process_incoming_message():
                 vin_from_ocr = _extract_vin_from_twilio_media_urls(image_urls)
                 if vin_from_ocr:
                     extracted_vin_from_image = vin_from_ocr
-                    incoming_message = f"VIN: {vin_from_ocr}"
-                    logger.info(f"✓ VIN extracted from image and added to message: {vin_from_ocr}")
+                    logger.info(f"✓ VIN extracted from image: {vin_from_ocr}")
+                    
+                    # Normalize phone number and get thread ID for database operations
+                    normalized_sender_phone = format_phone_number(sender_phone)
+                    if thread_id_param:
+                        thread_id = thread_id_param
+                        thread_id_mapping[normalized_sender_phone] = thread_id
+                    else:
+                        thread_id = thread_id_mapping.get(normalized_sender_phone, normalized_sender_phone)
+                        if normalized_sender_phone not in thread_id_mapping:
+                            thread_id_mapping[normalized_sender_phone] = thread_id
+                    
+                    # Build content description for inbound message
+                    content_description = incoming_message if incoming_message else ""
+                    if image_urls:
+                        if content_description:
+                            content_description += f" [Attached {len(image_urls)} image(s) via URL]"
+                        else:
+                            content_description = f"[Sent {len(image_urls)} image(s) via URL]"
+                    
+                    # Save inbound message to database
+                    save_message(
+                        thread_id=thread_id,
+                        phone_number=normalized_sender_phone,
+                        message_type='inbound',
+                        role='user',
+                        content=content_description
+                    )
+                    
+                    # Send immediate response with extracted VIN
+                    vin_response_message = f"VIN Number extracted from image: {vin_from_ocr}"
+                    response = MessagingResponse()
+                    response.message(vin_response_message)
+                    
+                    # Save outbound message to database
+                    save_message(
+                        thread_id=thread_id,
+                        phone_number=normalized_sender_phone,
+                        message_type='outbound',
+                        role='assistant',
+                        content=vin_response_message
+                    )
+                    
+                    logger.info(f"Sending VIN confirmation message - Thread ID: {thread_id}, To: {normalized_sender_phone}, VIN: {vin_from_ocr}")
+                    return str(response), 200, {'Content-Type': 'text/xml'}
                 else:
                     logger.warning(f"✗ Could not extract valid VIN from image(s)")
                     response = MessagingResponse()
@@ -1070,8 +1113,60 @@ def process_incoming_message():
                     )
                     return str(response), 200, {'Content-Type': 'text/xml'}
         
+        # Handle uploaded files (for Postman testing or direct file uploads)
+        if uploaded_files and not extracted_vin_from_image:
+            logger.info(f"Attempting to extract VIN from {len(uploaded_files)} uploaded file(s)...")
+            vin_from_uploaded = _extract_vin_from_uploaded_files(uploaded_files)
+            if vin_from_uploaded:
+                extracted_vin_from_image = vin_from_uploaded
+                logger.info(f"✓ VIN extracted from uploaded file: {vin_from_uploaded}")
+                
+                # Normalize phone number and get thread ID for database operations
+                normalized_sender_phone = format_phone_number(sender_phone)
+                if thread_id_param:
+                    thread_id = thread_id_param
+                    thread_id_mapping[normalized_sender_phone] = thread_id
+                else:
+                    thread_id = thread_id_mapping.get(normalized_sender_phone, normalized_sender_phone)
+                    if normalized_sender_phone not in thread_id_mapping:
+                        thread_id_mapping[normalized_sender_phone] = thread_id
+                
+                # Build content description for inbound message
+                content_description = incoming_message if incoming_message else ""
+                if uploaded_files:
+                    if content_description:
+                        content_description += f" [Uploaded {len(uploaded_files)} file(s)]"
+                    else:
+                        content_description = f"[Uploaded {len(uploaded_files)} file(s)]"
+                
+                # Save inbound message to database
+                save_message(
+                    thread_id=thread_id,
+                    phone_number=normalized_sender_phone,
+                    message_type='inbound',
+                    role='user',
+                    content=content_description
+                )
+                
+                # Send immediate response with extracted VIN
+                vin_response_message = f"VIN Number extracted from image: {vin_from_uploaded}"
+                response = MessagingResponse()
+                response.message(vin_response_message)
+                
+                # Save outbound message to database
+                save_message(
+                    thread_id=thread_id,
+                    phone_number=normalized_sender_phone,
+                    message_type='outbound',
+                    role='assistant',
+                    content=vin_response_message
+                )
+                
+                logger.info(f"Sending VIN confirmation message - Thread ID: {thread_id}, To: {normalized_sender_phone}, VIN: {vin_from_uploaded}")
+                return str(response), 200, {'Content-Type': 'text/xml'}
+        
         # Also check for VIN in text-only messages
-        if not image_urls and incoming_message:
+        if not image_urls and not uploaded_files and incoming_message:
             vin_in_text = _find_vin_in_text(incoming_message)
             if vin_in_text:
                 logger.info(f"✓ VIN found in text-only message: {vin_in_text}")
