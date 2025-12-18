@@ -1090,7 +1090,7 @@ def process_incoming_message():
                     )
                     
                     # Send immediate response with extracted VIN
-                    vin_response_message = f"VIN Number extracted from image: {vin_from_ocr}"
+                    vin_response_message = f"I got your VIN number as {vin_from_ocr} is that correct?"
                     response = MessagingResponse()
                     response.message(vin_response_message)
                     
@@ -1149,7 +1149,7 @@ def process_incoming_message():
                 )
                 
                 # Send immediate response with extracted VIN
-                vin_response_message = f"VIN Number extracted from image: {vin_from_uploaded}"
+                vin_response_message = f"I got your VIN number as {vin_from_uploaded} is that correct?"
                 response = MessagingResponse()
                 response.message(vin_response_message)
                 
