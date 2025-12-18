@@ -164,6 +164,8 @@ VIN_PATTERN_STRICT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 # This pattern looks for 17 alphanumeric chars (excluding I, O, Q) that may have
 # spaces/dashes/underscores between them, which OCR sometimes introduces
 VIN_PATTERN_LENIENT = re.compile(r"([A-HJ-NPR-Z0-9][\s\-_]?){16}[A-HJ-NPR-Z0-9]")
+# Pattern to find VIN keywords for context-aware extraction
+VIN_KEYWORD_PATTERN = re.compile(r'\b(?:VIN|VIN#|VIN:|V\.I\.N\.?|Vehicle\s+Identification\s+Number)\s*:?\s*', re.IGNORECASE)
 
 
 def _preprocess_for_vin_opencv(image_bytes: bytes) -> list[tuple[str, bytes]]:
@@ -259,6 +261,61 @@ def _preprocess_for_vin_opencv(image_bytes: bytes) -> list[tuple[str, bytes]]:
     return variants
 
 
+def _validate_vin_structure(vin: str) -> bool:
+    """
+    Validate that a VIN candidate has realistic VIN structure.
+    
+    VIN structure rules:
+    - Must be exactly 17 characters
+    - Cannot contain I, O, Q
+    - Positions 1-3 (WMI) should typically be letters (manufacturer code)
+    - Should have reasonable mix of letters and digits (not all same character)
+    - Should not be all digits or all letters
+    
+    Args:
+        vin: 17-character VIN candidate to validate
+        
+    Returns:
+        True if VIN structure looks valid, False otherwise
+    """
+    if not vin or len(vin) != 17:
+        return False
+    
+    # Check for invalid characters (I, O, Q)
+    if any(c in vin for c in ['I', 'O', 'Q']):
+        return False
+    
+    # Check that it's not all the same character (obviously fake)
+    if len(set(vin)) == 1:
+        return False
+    
+    # Check that positions 1-3 (WMI) are typically letters
+    # Most manufacturers use letters for WMI, though some use numbers
+    wmi = vin[:3]
+    if not any(c.isalpha() for c in wmi):
+        # If WMI has no letters, it's suspicious but not impossible
+        # Log it but don't reject
+        logger.debug(f"VIN candidate has no letters in WMI: {vin}")
+    
+    # Check for reasonable letter/digit distribution
+    # VINs typically have both letters and digits
+    has_letters = any(c.isalpha() for c in vin)
+    has_digits = any(c.isdigit() for c in vin)
+    
+    # Most VINs have both letters and digits
+    if not (has_letters and has_digits):
+        logger.debug(f"VIN candidate lacks letter/digit mix: {vin}")
+        # Don't reject, but log for debugging
+    
+    # Check that it's not obviously a pattern (like all 0s or all 1s)
+    digit_count = sum(1 for c in vin if c.isdigit())
+    if digit_count > 15:  # Too many digits, likely not a real VIN
+        logger.debug(f"VIN candidate has too many digits: {vin}")
+        return False
+    
+    return True
+
+
 def _correct_vin_ocr_errors(vin_candidate: str) -> str:
     """
     Correct common OCR errors in VIN candidates.
@@ -317,50 +374,96 @@ def _correct_vin_ocr_errors(vin_candidate: str) -> str:
 
 def _find_vin_in_text(text: str) -> Optional[str]:
     """
-    Try to locate a valid-looking VIN within text with enhanced error correction.
+    Try to locate a valid-looking VIN within text with enhanced error correction and strict validation.
 
-    This function uses multiple strategies to find VINs, similar to the OCR test script:
-    1. Normalize text (remove spaces, dashes, etc.) and match strict pattern
-    2. Try lenient pattern that handles OCR spacing artifacts
-    3. Extract 17-character sequences and attempt character correction
-    4. Validate corrected candidates
+    This function uses multiple strategies to find VINs, prioritizing context-aware extraction:
+    1. Look for VINs near keywords (VIN, VIN#, VIN:, etc.) - HIGHEST PRIORITY
+    2. Normalize text and match strict pattern with validation
+    3. Try lenient pattern that handles OCR spacing artifacts with validation
+    4. Extract and validate 17-character sequences with OCR error correction (only if no keyword matches)
 
     Notes:
         - VINs are 17 characters and exclude I, O, Q (to avoid confusion with 1/0).
         - OCR may misread I as 1, O as 0, Q as O or 0.
-        - This function attempts to correct common OCR errors.
+        - This function attempts to correct common OCR errors and validates structure.
+        - VINs found near keywords are prioritized to reduce false positives.
 
     Args:
         text: Arbitrary text (OCR output or user message).
 
     Returns:
-        A 17-character VIN string if found; otherwise None.
+        A 17-character VIN string if found and validated; otherwise None.
     """
     if not text:
         return None
 
-    # Strategy 1: Normalize and use strict pattern (original approach)
-    normalized = re.sub(r"[\s\-_:]", "", text.upper())
+    text_upper = text.upper()
+    normalized = re.sub(r"[\s\-_:]", "", text_upper)
+    
+    # Strategy 1: Look for VINs near keywords (HIGHEST PRIORITY - most reliable)
+    # This reduces false positives by only extracting VINs in context
+    keyword_matches = list(VIN_KEYWORD_PATTERN.finditer(text))
+    
+    for keyword_match in keyword_matches:
+        # Extract text after the keyword (up to 30 characters to allow for spacing)
+        start_pos = keyword_match.end()
+        context_text = text_upper[start_pos:start_pos + 30]
+        
+        # Try strict pattern first in the context
+        context_normalized = re.sub(r"[\s\-_:]", "", context_text)
+        match = VIN_PATTERN_STRICT.search(context_normalized)
+        if match:
+            vin = match.group(1)
+            if _validate_vin_structure(vin):
+                logger.info(f"VIN found near keyword using strict pattern: {vin}")
+                return vin
+        
+        # Try lenient pattern in context
+        match_lenient = VIN_PATTERN_LENIENT.search(context_text)
+        if match_lenient:
+            matched_text = match_lenient.group(0)
+            normalized_vin = re.sub(r"[\s\-_:]", "", matched_text)
+            if len(normalized_vin) == 17 and VIN_PATTERN_STRICT.match(normalized_vin):
+                if _validate_vin_structure(normalized_vin):
+                    logger.info(f"VIN found near keyword using lenient pattern: {normalized_vin}")
+                    return normalized_vin
+        
+        # Try with OCR error correction in context
+        lenient_pattern = re.compile(r'[A-Z0-9]{17}')
+        matches = lenient_pattern.findall(context_normalized)
+        for candidate in matches:
+            corrected = _correct_vin_ocr_errors(candidate)
+            if VIN_PATTERN_STRICT.match(corrected) and _validate_vin_structure(corrected):
+                logger.info(f"VIN found near keyword after correction: {candidate} -> {corrected}")
+                return corrected
+            if VIN_PATTERN_STRICT.match(candidate) and _validate_vin_structure(candidate):
+                logger.info(f"VIN found near keyword (no correction needed): {candidate}")
+                return candidate
+
+    # Strategy 2: Normalize and use strict pattern with validation (only if no keyword matches)
     match = VIN_PATTERN_STRICT.search(normalized)
     if match:
         vin = match.group(1)
-        logger.debug(f"VIN found using strict pattern: {vin}")
-        return vin
+        if _validate_vin_structure(vin):
+            logger.info(f"VIN found using strict pattern: {vin}")
+            return vin
+        else:
+            logger.warning(f"VIN candidate failed structure validation: {vin}")
 
-    # Strategy 2: Try lenient pattern on original text (handles OCR spacing)
-    # This looks for patterns like "1HG CM82633A123456" or "1HG-CM82633A123456"
-    match_lenient = VIN_PATTERN_LENIENT.search(text.upper())
+    # Strategy 3: Try lenient pattern on original text (handles OCR spacing) with validation
+    match_lenient = VIN_PATTERN_LENIENT.search(text_upper)
     if match_lenient:
-        # Extract the matched portion and normalize it
         matched_text = match_lenient.group(0)
         normalized_vin = re.sub(r"[\s\-_:]", "", matched_text)
-        # Validate it's exactly 17 characters and matches VIN pattern
         if len(normalized_vin) == 17 and VIN_PATTERN_STRICT.match(normalized_vin):
-            logger.debug(f"VIN found using lenient pattern: {normalized_vin}")
-            return normalized_vin
+            if _validate_vin_structure(normalized_vin):
+                logger.info(f"VIN found using lenient pattern: {normalized_vin}")
+                return normalized_vin
+            else:
+                logger.warning(f"VIN candidate from lenient pattern failed validation: {normalized_vin}")
 
-    # Strategy 3: Look for any sequence of 17 alphanumeric characters (including I, O, Q)
-    # Then attempt to correct OCR errors
+    # Strategy 4: Look for 17-character sequences with word boundaries and validate
+    # Only use this as last resort, and only with word boundaries to avoid false matches
     lenient_pattern = re.compile(r'\b[A-Z0-9]{17}\b')
     matches = lenient_pattern.findall(normalized)
     
@@ -369,30 +472,20 @@ def _find_vin_in_text(text: str) -> Optional[str]:
         corrected = _correct_vin_ocr_errors(candidate)
         
         # Validate corrected candidate
-        if VIN_PATTERN_STRICT.match(corrected):
-            logger.debug(f"VIN found after correction: {candidate} -> {corrected}")
+        if VIN_PATTERN_STRICT.match(corrected) and _validate_vin_structure(corrected):
+            logger.info(f"VIN found after correction: {candidate} -> {corrected}")
             return corrected
         
         # Also check if original candidate is valid (in case correction wasn't needed)
-        if VIN_PATTERN_STRICT.match(candidate):
-            logger.debug(f"VIN found (no correction needed): {candidate}")
+        if VIN_PATTERN_STRICT.match(candidate) and _validate_vin_structure(candidate):
+            logger.info(f"VIN found (no correction needed): {candidate}")
             return candidate
 
-    # Strategy 4: Sliding window approach for cases without word boundaries
-    for i in range(len(normalized) - 16):
-        candidate = normalized[i:i+17]
-        # Check if it's all alphanumeric
-        if re.match(r'^[A-Z0-9]{17}$', candidate):
-            # Attempt correction
-            corrected = _correct_vin_ocr_errors(candidate)
-            if VIN_PATTERN_STRICT.match(corrected):
-                logger.debug(f"VIN found via sliding window with correction: {candidate} -> {corrected}")
-                return corrected
-            # Check original
-            if VIN_PATTERN_STRICT.match(candidate):
-                logger.debug(f"VIN found via sliding window: {candidate}")
-                return candidate
+    # Strategy 5: REMOVED - Sliding window approach was too error-prone
+    # It would match random 17-character sequences that aren't VINs
+    # If we can't find a VIN with word boundaries or context, it's likely not there
 
+    logger.debug(f"No valid VIN found in text. Text length: {len(text)}, Sample: {text[:200]}")
     return None
 
 
@@ -462,7 +555,7 @@ def _ocr_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
         if not all_results or not CV2_AVAILABLE:
             image = Image.open(io.BytesIO(image_bytes))
             image = ImageOps.exif_transpose(image)
-            
+
             original_size = image.size
             preprocessing_variants = []
 
@@ -574,12 +667,17 @@ def _extract_vin_from_twilio_media_urls(image_urls: list[str]) -> Optional[str]:
             
             vin = _find_vin_in_text(ocr_text)
             if vin:
-                logger.info(f"VIN extracted from image via OCR: {vin}")
+                logger.info(f"✓ Valid VIN extracted from image via OCR: {vin}")
+                logger.info(f"  VIN validation passed - structure looks correct")
                 return vin
             else:
                 # Log when OCR text exists but no VIN found - helps debug regex matching
                 if ocr_text:
-                    logger.warning(f"OCR extracted text but no valid 17-character VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
+                    logger.warning(f"✗ OCR extracted text but no valid VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
+                    # Check if there are any 17-character sequences that were rejected
+                    potential_vins = re.findall(r'[A-Z0-9]{17}', re.sub(r'[\s\-_:]', '', ocr_text.upper()))
+                    if potential_vins:
+                        logger.warning(f"  Found {len(potential_vins)} potential 17-character sequences but none passed validation: {potential_vins[:3]}")
         except Exception as e:
             logger.warning(f"Failed to OCR media URL '{image_url}': {e}")
             continue
@@ -630,12 +728,17 @@ def _extract_vin_from_uploaded_files(uploaded_files: list) -> Optional[str]:
             # Try to find VIN in OCR text
             vin = _find_vin_in_text(ocr_text)
             if vin:
-                logger.info(f"VIN extracted from uploaded file via OCR: {vin}")
+                logger.info(f"✓ Valid VIN extracted from uploaded file via OCR: {vin}")
+                logger.info(f"  VIN validation passed - structure looks correct")
                 return vin
             else:
                 # Log when OCR text exists but no VIN found
                 if ocr_text:
-                    logger.warning(f"OCR extracted text but no valid 17-character VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
+                    logger.warning(f"✗ OCR extracted text but no valid VIN found. Text length: {len(ocr_text)}, Sample: {ocr_text[:200]}")
+                    # Check if there are any 17-character sequences that were rejected
+                    potential_vins = re.findall(r'[A-Z0-9]{17}', re.sub(r'[\s\-_:]', '', ocr_text.upper()))
+                    if potential_vins:
+                        logger.warning(f"  Found {len(potential_vins)} potential 17-character sequences but none passed validation: {potential_vins[:3]}")
         except Exception as e:
             logger.warning(f"Failed to OCR uploaded file '{file_key}': {e}")
             continue
@@ -949,17 +1052,30 @@ def process_incoming_message():
         # We should OCR whenever images exist AND no VIN is present in the text.
         if image_urls:
             vin_in_text = _find_vin_in_text(incoming_message)
+            if vin_in_text:
+                logger.info(f"✓ VIN found in text message: {vin_in_text}")
+                extracted_vin_from_image = vin_in_text
             if not vin_in_text:
+                logger.info(f"Attempting to extract VIN from {len(image_urls)} image(s)...")
                 vin_from_ocr = _extract_vin_from_twilio_media_urls(image_urls)
                 if vin_from_ocr:
                     extracted_vin_from_image = vin_from_ocr
                     incoming_message = f"VIN: {vin_from_ocr}"
+                    logger.info(f"✓ VIN extracted from image and added to message: {vin_from_ocr}")
                 else:
+                    logger.warning(f"✗ Could not extract valid VIN from image(s)")
                     response = MessagingResponse()
                     response.message(
                         "I couldn’t read the VIN from that photo. Can you please type the 17‑digit VIN, or send a clearer close-up of the VIN plate/sticker?"
                     )
                     return str(response), 200, {'Content-Type': 'text/xml'}
+        
+        # Also check for VIN in text-only messages
+        if not image_urls and incoming_message:
+            vin_in_text = _find_vin_in_text(incoming_message)
+            if vin_in_text:
+                logger.info(f"✓ VIN found in text-only message: {vin_in_text}")
+                extracted_vin_from_image = vin_in_text
         
         if not sender_phone:
             logger.warning("Received message without sender phone number")
